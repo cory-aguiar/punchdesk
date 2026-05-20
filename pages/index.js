@@ -238,38 +238,44 @@ function LoginPage({ onLogin, toast }) {
     e.preventDefault()
     setLoading(true); setErr('')
     try {
-      const sb = getClient()
+      const SURL = 'https://lnnbeupwdgtemhbtahbw.supabase.co'
+      const SKEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxubmJldXB3ZGd0ZW1oYnRhaGJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNDE0NTQsImV4cCI6MjA5NDgxNzQ1NH0.O6qLkJi0vh3c0yU-ZYicz3ky9Hs6VQE4LEimQbM-1oA'
 
-      // First test if Supabase is reachable at all
-      let canReach = false
-      try {
-        const testPromise = sb.from('holidays').select('count').limit(1)
-        const testTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
-        await Promise.race([testPromise, testTimeout])
-        canReach = true
-      } catch(testErr) {
-        console.error('Supabase not reachable:', testErr)
-        setErr('Cannot reach the server. This is usually a configuration issue — not your internet connection. Please contact your admin.')
-        setLoading(false)
-        return
-      }
-
-      // Try login with 15 second timeout
-      const loginPromise = sb.auth.signInWithPassword({ email, password: pw })
-      const timeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Login timed out. The server is reachable but auth is slow — try again.')), 15000)
-      )
-      const { data, error } = await Promise.race([loginPromise, timeout])
-      if (error) throw error
-      if (!data?.user) throw new Error('Login failed — please try again')
+      // Sign in using raw fetch — bypasses any JS library CSP issues
+      const authRes = await fetch(`${SURL}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SKEY,
+        },
+        body: JSON.stringify({ email, password: pw })
+      })
+      const authData = await authRes.json()
+      if (!authRes.ok) throw new Error(authData.error_description || authData.msg || 'Invalid email or password')
       
-      // Fetch profile
-      const { data: profileData } = await sb.from('profiles').select('*').eq('id', data.user.id).single()
-      const d = profileData || {}
+      const accessToken = authData.access_token
+      const userId = authData.user?.id
+      if (!userId) throw new Error('Login failed — no user returned')
+
+      // Store the session token so Supabase client can use it
+      const sb = getClient()
+      await sb.auth.setSession({ access_token: accessToken, refresh_token: authData.refresh_token })
+
+      // Fetch profile using raw fetch with the access token
+      const profileRes = await fetch(`${SURL}/rest/v1/profiles?id=eq.${userId}&select=*`, {
+        headers: {
+          'apikey': SKEY,
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      })
+      const profileArr = await profileRes.json()
+      const d = (profileArr && profileArr[0]) || {}
+
       const profile = {
-        id: data.user.id,
-        email: data.user.email || '',
-        first_name: d.first_name || data.user.email?.split('@')[0] || 'User',
+        id: userId,
+        email: authData.user?.email || '',
+        first_name: d.first_name || authData.user?.email?.split('@')[0] || 'User',
         last_name: d.last_name || '',
         role: d.role || 'employee',
         department: d.department || '',
@@ -279,7 +285,7 @@ function LoginPage({ onLogin, toast }) {
         is_active: d.is_active ?? true,
         hourly_rate: d.hourly_rate || 0,
       }
-      onLogin(data.user, profile)
+      onLogin(authData.user, profile)
     } catch (e) { setErr(e.message || 'Invalid email or password') }
     finally { setLoading(false) }
   }
