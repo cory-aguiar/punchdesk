@@ -1014,16 +1014,39 @@ export default function App() {
     async function loadProfile(user) {
       try {
         const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single()
-        if (error) { console.error('Profile error:', error); return null }
-        return data
-      } catch(e) { console.error('Profile fetch failed:', e); return null }
+        if (error) console.error('Profile error:', error)
+        const d = data || {}
+        return {
+          id: user.id,
+          email: user.email || '',
+          first_name: d.first_name || user.email?.split('@')[0] || 'User',
+          last_name: d.last_name || '',
+          role: d.role || 'employee',
+          department: d.department || '',
+          employment_type: d.employment_type || 'fulltime',
+          pto_balance: d.pto_balance ?? 15,
+          pto_used: d.pto_used ?? 0,
+          is_active: d.is_active ?? true,
+          hourly_rate: d.hourly_rate || 0,
+        }
+      } catch(e) {
+        console.error('Profile fetch failed:', e)
+        return {
+          id: user.id, email: user.email || '',
+          first_name: user.email?.split('@')[0] || 'User',
+          last_name: '', role: 'employee',
+          department: '', employment_type: 'fulltime',
+          pto_balance: 15, pto_used: 0, is_active: true, hourly_rate: 0,
+        }
+      }
     }
 
     sb.auth.getSession().then(async({data:{session}})=>{
       setSession(session)
       if (session?.user) {
         const p = await loadProfile(session.user)
-        if (p) { setProfile(p); setPage(['admin','manager'].includes(p.role)?'dashboard':'clock') }
+        setProfile(p)
+        setPage(['admin','manager'].includes(p.role)?'dashboard':'clock')
       }
       setLoading(false)
     })
@@ -1032,8 +1055,9 @@ export default function App() {
       setSession(session)
       if (session?.user) {
         const p = await loadProfile(session.user)
-        if (p) { setProfile(p); setPage(['admin','manager'].includes(p.role)?'dashboard':'clock') }
-        else { setLoading(false) }
+        setProfile(p)
+        setPage(['admin','manager'].includes(p.role)?'dashboard':'clock')
+        setLoading(false)
       } else {
         setProfile(null); setPage('clock'); setLoading(false)
       }
