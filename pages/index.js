@@ -1733,6 +1733,437 @@ function PTOPage({ profile, toast }) {
 }
 
 
+// ─── Timesheet Edit Request Page ─────────────────────────────
+function TimesheetEditPage({ profile, toast }) {
+  const isManager = ['admin','manager'].includes(profile.role)
+  const sb = getClient()
+  const [tab, setTab] = useState(isManager ? 'pending' : 'my')
+  const [myEntries, setMyEntries] = useState([])
+  const [pendingEdits, setPendingEdits] = useState([])
+  const [allEdits, setAllEdits] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [requestModal, setRequestModal] = useState(false)
+  const [selectedEntry, setSelectedEntry] = useState(null)
+  const [editForm, setEditForm] = useState({ clockIn: '', clockOut: '', breakMins: '', reason: '' })
+  const [denyModal, setDenyModal] = useState(false)
+  const [denyTarget, setDenyTarget] = useState(null)
+  const [denyReason, setDenyReason] = useState('')
+
+  useEffect(() => { load() }, [tab])
+
+  async function load() {
+    setLoading(true)
+    try {
+      if (tab === 'my') {
+        // Employee's own recent entries
+        const { data } = await sb.from('time_entries')
+          .select('*')
+          .eq('employee_id', profile.id)
+          .not('clock_out', 'is', null)
+          .order('clock_in', { ascending: false })
+          .limit(30)
+        setMyEntries(data || [])
+
+        // Their own edit requests
+        const { data: edits } = await sb.from('timesheet_edit_requests')
+          .select('*, time_entries(clock_in, clock_out, break_mins)')
+          .eq('employee_id', profile.id)
+          .order('created_at', { ascending: false })
+        setAllEdits(edits || [])
+      } else {
+        // Manager views pending or all requests
+        const q = sb.from('timesheet_edit_requests')
+          .select('*, profiles!timesheet_edit_requests_employee_id_fkey(first_name, last_name, department), time_entries(clock_in, clock_out, break_mins)')
+          .order('created_at', { ascending: false })
+        if (tab === 'pending') {
+          const { data } = await q.eq('status', 'pending')
+          setPendingEdits(data || [])
+        } else {
+          const { data } = await q
+          setAllEdits(data || [])
+        }
+      }
+    } catch(e) { toast(e.message, 'error') }
+    finally { setLoading(false) }
+  }
+
+  function openEditRequest(entry) {
+    setSelectedEntry(entry)
+    // Pre-fill with current values
+    const ci = new Date(entry.clock_in)
+    const co = entry.clock_out ? new Date(entry.clock_out) : null
+    setEditForm({
+      clockIn: formatForInput(ci),
+      clockOut: co ? formatForInput(co) : '',
+      breakMins: entry.break_mins || 0,
+      reason: ''
+    })
+    setRequestModal(true)
+  }
+
+  function formatForInput(d) {
+    // Format as datetime-local value: YYYY-MM-DDTHH:MM
+    const pad = n => String(n).padStart(2,'0')
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+
+  async function submitEditRequest() {
+    if (!editForm.clockIn) { toast('Clock-in time is required', 'error'); return }
+    if (!editForm.reason.trim()) { toast('Please explain why this edit is needed', 'error'); return }
+    try {
+      const { error } = await sb.from('timesheet_edit_requests').insert({
+        employee_id: profile.id,
+        time_entry_id: selectedEntry.id,
+        original_clock_in: selectedEntry.clock_in,
+        original_clock_out: selectedEntry.clock_out,
+        original_break_mins: selectedEntry.break_mins,
+        requested_clock_in: new Date(editForm.clockIn).toISOString(),
+        requested_clock_out: editForm.clockOut ? new Date(editForm.clockOut).toISOString() : null,
+        requested_break_mins: parseInt(editForm.breakMins) || 0,
+        reason: editForm.reason.trim(),
+        status: 'pending'
+      })
+      if (error) throw error
+      toast('Edit request submitted for approval')
+      setRequestModal(false)
+      setSelectedEntry(null)
+      load()
+    } catch(e) { toast(e.message, 'error') }
+  }
+
+  async function approveEdit(req) {
+    try {
+      // Apply the requested changes to the actual time entry
+      const { error: entryErr } = await sb.from('time_entries').update({
+        clock_in: req.requested_clock_in,
+        clock_out: req.requested_clock_out,
+        break_mins: req.requested_break_mins,
+        status: 'approved'
+      }).eq('id', req.time_entry_id)
+      if (entryErr) throw entryErr
+
+      // Mark request approved
+      const { error: reqErr } = await sb.from('timesheet_edit_requests').update({
+        status: 'approved',
+        reviewed_by: profile.id,
+        reviewed_at: new Date().toISOString()
+      }).eq('id', req.id)
+      if (reqErr) throw reqErr
+
+      toast('Edit approved and applied')
+      load()
+    } catch(e) { toast(e.message, 'error') }
+  }
+
+  async function denyEdit() {
+    if (!denyReason.trim()) { toast('Please provide a reason for denial', 'error'); return }
+    try {
+      await sb.from('timesheet_edit_requests').update({
+        status: 'denied',
+        reviewed_by: profile.id,
+        reviewed_at: new Date().toISOString(),
+        denial_reason: denyReason.trim()
+      }).eq('id', denyTarget.id)
+      toast('Request denied')
+      setDenyModal(false)
+      setDenyTarget(null)
+      setDenyReason('')
+      load()
+    } catch(e) { toast(e.message, 'error') }
+  }
+
+  function fmtDT(iso) {
+    if (!iso) return '—'
+    return new Date(iso).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit', hour12:true })
+  }
+
+  function calcH(ci, co, brk=0) {
+    if (!ci || !co) return '—'
+    const h = ((new Date(co) - new Date(ci)) / 3600000) - brk/60
+    return `${Math.max(0,h).toFixed(2)}h`
+  }
+
+  const tabs = [
+    ...(isManager ? [{ id:'pending', label:'Pending Requests' }, { id:'all-mgr', label:'All Requests' }] : []),
+    { id:'my', label: isManager ? 'My Timesheets' : 'Request an Edit' }
+  ]
+
+  return (
+    <div>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
+        <div>
+          <div style={{ fontSize:22, fontWeight:600, letterSpacing:-.4 }}>Timesheet Edits</div>
+          <div style={{ fontSize:13, color:C.midGray, marginTop:3 }}>
+            {isManager ? 'Review and approve employee timesheet corrections' : 'Request a correction to a timesheet entry'}
+          </div>
+        </div>
+        {isManager && tab==='pending' && pendingEdits.length > 0 && (
+          <div style={{ background:'#cc4444', color:'#fff', borderRadius:99, fontSize:12, fontWeight:600, padding:'4px 12px', fontFamily:'var(--mono)' }}>
+            {pendingEdits.length} pending
+          </div>
+        )}
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display:'flex', gap:4, background:C.offWhite, borderRadius:7, padding:4, marginBottom:20 }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            flex:1, padding:'7px 14px', border:'none', cursor:'pointer',
+            fontFamily:'var(--font)', fontSize:13, borderRadius:6, transition:'all .14s',
+            background: tab===t.id ? C.white : 'transparent',
+            color: tab===t.id ? C.black : C.midGray,
+            fontWeight: tab===t.id ? 500 : 400,
+            boxShadow: tab===t.id ? '0 1px 3px rgba(0,0,0,.08)' : 'none'
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {/* MY TIMESHEETS — employee picks an entry to edit */}
+      {tab === 'my' && (
+        <>
+          {/* My pending/past requests */}
+          {allEdits.length > 0 && (
+            <Card style={{ marginBottom:16 }}>
+              <CardHeader title="My Edit Requests"/>
+              {allEdits.map(r => (
+                <div key={r.id} style={{ borderBottom:`1px solid ${C.offWhite}`, padding:'12px 0' }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:10, marginBottom:6 }}>
+                    <Badge variant={r.status==='approved'?'approved':r.status==='denied'?'flagged':'pending'}>
+                      {r.status}
+                    </Badge>
+                    <span style={{ fontSize:12, color:C.midGray }}>
+                      Requested {fmtDT(r.created_at)}
+                    </span>
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, fontSize:12, marginBottom:6 }}>
+                    <div style={{ background:C.offWhite, borderRadius:5, padding:'8px 10px' }}>
+                      <div style={{ fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:.5, color:C.lightGray, marginBottom:4 }}>Original</div>
+                      <div style={{ fontFamily:'var(--mono)' }}>In: {formatTime(r.original_clock_in)}</div>
+                      <div style={{ fontFamily:'var(--mono)' }}>Out: {formatTime(r.original_clock_out)}</div>
+                      <div style={{ color:C.midGray }}>Break: {r.original_break_mins||0}m</div>
+                    </div>
+                    <div style={{ background: r.status==='approved' ? '#f0fdf4' : C.offWhite, border: r.status==='approved'?'1px solid #bbf7d0':'none', borderRadius:5, padding:'8px 10px' }}>
+                      <div style={{ fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:.5, color:C.lightGray, marginBottom:4 }}>Requested</div>
+                      <div style={{ fontFamily:'var(--mono)' }}>In: {formatTime(r.requested_clock_in)}</div>
+                      <div style={{ fontFamily:'var(--mono)' }}>Out: {formatTime(r.requested_clock_out)}</div>
+                      <div style={{ color:C.midGray }}>Break: {r.requested_break_mins||0}m</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize:12, color:C.midGray }}>
+                    <strong style={{ color:C.black }}>Reason:</strong> {r.reason}
+                  </div>
+                  {r.denial_reason && (
+                    <div style={{ fontSize:12, color:'#cc4444', marginTop:4 }}>
+                      <strong>Denied:</strong> {r.denial_reason}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </Card>
+          )}
+
+          {/* Recent entries table */}
+          <Card>
+            <CardHeader title="Recent Timesheet Entries" right="Click an entry to request an edit"/>
+            {loading ? <div style={{color:C.lightGray}}>Loading…</div> : (
+              <div style={{ overflowX:'auto' }}>
+                <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+                  <thead>
+                    <tr>{['Date','Clock In','Clock Out','Break','Hours','Status',''].map(h=><TH key={h}>{h}</TH>)}</tr>
+                  </thead>
+                  <tbody>
+                    {myEntries.length===0 && <tr><TD colSpan={7} style={{textAlign:'center',color:C.lightGray,padding:32}}>No entries found</TD></tr>}
+                    {myEntries.map(e => (
+                      <tr key={e.id}>
+                        <TD style={{fontSize:12}}>{formatDate(e.clock_in)}</TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12}}>{formatTime(e.clock_in)}</TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12}}>{formatTime(e.clock_out)}</TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12,color:C.midGray}}>{e.break_mins ? `${e.break_mins}m` : '—'}</TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:500}}>{calcH(e.clock_in,e.clock_out,e.break_mins)}</TD>
+                        <TD><Badge variant={e.status==='approved'?'approved':e.status==='flagged'?'flagged':e.status==='active'?'active':'pending'}>{e.status}</Badge></TD>
+                        <TD>
+                          <Btn size="sm" variant="outline" onClick={() => openEditRequest(e)}>
+                            Request Edit
+                          </Btn>
+                        </TD>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
+      {/* MANAGER — Pending requests */}
+      {tab === 'pending' && isManager && (
+        <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+          {loading ? <div style={{color:C.lightGray}}>Loading…</div> :
+           pendingEdits.length === 0 ? (
+            <Card>
+              <div style={{ textAlign:'center', padding:'40px 0', color:C.lightGray, fontSize:13 }}>
+                No pending edit requests — all caught up!
+              </div>
+            </Card>
+           ) : pendingEdits.map(r => (
+            <Card key={r.id}>
+              {/* Header */}
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14 }}>
+                <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                  <Avatar first={r.profiles?.first_name} last={r.profiles?.last_name} size={32}/>
+                  <div>
+                    <div style={{ fontWeight:600 }}>{r.profiles?.first_name} {r.profiles?.last_name}</div>
+                    <div style={{ fontSize:12, color:C.midGray }}>{r.profiles?.department} · Requested {fmtDT(r.created_at)}</div>
+                  </div>
+                </div>
+                <Badge variant="pending">Pending</Badge>
+              </div>
+
+              {/* Reason — prominently displayed */}
+              <div style={{ background:'#fffbeb', border:'1px solid #fde68a', borderRadius:6, padding:'10px 14px', marginBottom:14 }}>
+                <div style={{ fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:.5, color:'#92400e', marginBottom:4 }}>Employee Note</div>
+                <div style={{ fontSize:13, color:C.black }}>{r.reason}</div>
+              </div>
+
+              {/* Before / After comparison */}
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:14 }}>
+                <div style={{ background:C.offWhite, borderRadius:6, padding:'12px 14px' }}>
+                  <div style={{ fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:.5, color:C.lightGray, marginBottom:8 }}>Original Entry</div>
+                  <div style={{ fontSize:13, marginBottom:4 }}><span style={{color:C.midGray}}>Date:</span> {formatDate(r.original_clock_in)}</div>
+                  <div style={{ fontSize:13, marginBottom:4 }}><span style={{color:C.midGray}}>In:</span> <span style={{fontFamily:'var(--mono)'}}>{formatTime(r.original_clock_in)}</span></div>
+                  <div style={{ fontSize:13, marginBottom:4 }}><span style={{color:C.midGray}}>Out:</span> <span style={{fontFamily:'var(--mono)'}}>{formatTime(r.original_clock_out)}</span></div>
+                  <div style={{ fontSize:13, color:C.midGray }}>Break: {r.original_break_mins||0}m</div>
+                  <div style={{ fontSize:13, fontWeight:600, marginTop:8, color:C.midGray }}>Total: {calcH(r.original_clock_in,r.original_clock_out,r.original_break_mins)}</div>
+                </div>
+                <div style={{ background:'#f0fdf4', border:'1px solid #bbf7d0', borderRadius:6, padding:'12px 14px' }}>
+                  <div style={{ fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:.5, color:'#166534', marginBottom:8 }}>Requested Change</div>
+                  <div style={{ fontSize:13, marginBottom:4 }}><span style={{color:C.midGray}}>Date:</span> {formatDate(r.requested_clock_in)}</div>
+                  <div style={{ fontSize:13, marginBottom:4 }}><span style={{color:C.midGray}}>In:</span> <span style={{fontFamily:'var(--mono)',color: r.requested_clock_in !== r.original_clock_in ? '#166534' : C.black, fontWeight: r.requested_clock_in !== r.original_clock_in ? 600 : 400}}>{formatTime(r.requested_clock_in)}</span></div>
+                  <div style={{ fontSize:13, marginBottom:4 }}><span style={{color:C.midGray}}>Out:</span> <span style={{fontFamily:'var(--mono)',color: r.requested_clock_out !== r.original_clock_out ? '#166534' : C.black, fontWeight: r.requested_clock_out !== r.original_clock_out ? 600 : 400}}>{formatTime(r.requested_clock_out)}</span></div>
+                  <div style={{ fontSize:13, color: r.requested_break_mins !== r.original_break_mins ? '#166534' : C.midGray, fontWeight: r.requested_break_mins !== r.original_break_mins ? 600 : 400 }}>Break: {r.requested_break_mins||0}m</div>
+                  <div style={{ fontSize:13, fontWeight:600, marginTop:8, color:'#166534' }}>Total: {calcH(r.requested_clock_in,r.requested_clock_out,r.requested_break_mins)}</div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+                <Btn variant="danger" onClick={() => { setDenyTarget(r); setDenyModal(true) }}>Deny</Btn>
+                <Btn onClick={() => approveEdit(r)}>Approve &amp; Apply</Btn>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* MANAGER — All requests history */}
+      {tab === 'all-mgr' && isManager && (
+        <Card>
+          <CardHeader title="All Edit Requests"/>
+          {loading ? <div style={{color:C.lightGray}}>Loading…</div> : (
+            <div style={{ overflowX:'auto' }}>
+              <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+                <thead>
+                  <tr>{['Employee','Date','Original In/Out','Requested In/Out','Reason','Status',''].map(h=><TH key={h}>{h}</TH>)}</tr>
+                </thead>
+                <tbody>
+                  {allEdits.length===0 && <tr><TD colSpan={7} style={{textAlign:'center',color:C.lightGray,padding:32}}>No edit requests yet</TD></tr>}
+                  {allEdits.map(r => (
+                    <tr key={r.id}>
+                      <TD style={{fontWeight:500,fontSize:12}}>{r.profiles?.first_name} {r.profiles?.last_name}</TD>
+                      <TD style={{fontSize:12}}>{formatDate(r.original_clock_in)}</TD>
+                      <TD style={{fontFamily:'var(--mono)',fontSize:11,color:C.midGray}}>
+                        {formatTime(r.original_clock_in)} – {formatTime(r.original_clock_out)}
+                      </TD>
+                      <TD style={{fontFamily:'var(--mono)',fontSize:11}}>
+                        {formatTime(r.requested_clock_in)} – {formatTime(r.requested_clock_out)}
+                      </TD>
+                      <TD style={{fontSize:12,color:C.midGray,maxWidth:200}}>
+                        <div style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.reason}</div>
+                      </TD>
+                      <TD>
+                        <Badge variant={r.status==='approved'?'approved':r.status==='denied'?'flagged':'pending'}>
+                          {r.status}
+                        </Badge>
+                      </TD>
+                      <TD>
+                        {r.status==='pending' && (
+                          <div style={{display:'flex',gap:5}}>
+                            <Btn size="sm" onClick={()=>approveEdit(r)}>✓</Btn>
+                            <Btn size="sm" variant="danger" onClick={()=>{setDenyTarget(r);setDenyModal(true)}}>✕</Btn>
+                          </div>
+                        )}
+                      </TD>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
+      )}
+
+      {/* Request Edit Modal */}
+      <Modal open={requestModal} onClose={()=>setRequestModal(false)} title="Request Timesheet Edit">
+        {selectedEntry && (
+          <>
+            <div style={{ background:C.offWhite, borderRadius:6, padding:'10px 14px', marginBottom:18 }}>
+              <div style={{ fontSize:11, fontWeight:600, textTransform:'uppercase', letterSpacing:.5, color:C.lightGray, marginBottom:6 }}>Current Entry</div>
+              <div style={{ display:'flex', gap:20, fontSize:13 }}>
+                <span><span style={{color:C.midGray}}>Date:</span> {formatDate(selectedEntry.clock_in)}</span>
+                <span><span style={{color:C.midGray}}>In:</span> <span style={{fontFamily:'var(--mono)'}}>{formatTime(selectedEntry.clock_in)}</span></span>
+                <span><span style={{color:C.midGray}}>Out:</span> <span style={{fontFamily:'var(--mono)'}}>{formatTime(selectedEntry.clock_out)}</span></span>
+                <span style={{color:C.midGray}}>Break: {selectedEntry.break_mins||0}m</span>
+              </div>
+            </div>
+
+            <div style={{ fontSize:13, fontWeight:600, marginBottom:14, color:C.black }}>Enter corrected values:</div>
+
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+              <Input label="Corrected Clock In" type="datetime-local"
+                value={editForm.clockIn} onChange={e=>setEditForm(f=>({...f,clockIn:e.target.value}))}/>
+              <Input label="Corrected Clock Out" type="datetime-local"
+                value={editForm.clockOut} onChange={e=>setEditForm(f=>({...f,clockOut:e.target.value}))}/>
+            </div>
+            <Input label="Break (minutes)" type="number" min="0" max="120"
+              value={editForm.breakMins} onChange={e=>setEditForm(f=>({...f,breakMins:e.target.value}))} placeholder="0"/>
+
+            <div style={{ marginBottom:16 }}>
+              <FormLabel>Reason for Edit <span style={{color:'#cc4444'}}>*</span></FormLabel>
+              <textarea value={editForm.reason} onChange={e=>setEditForm(f=>({...f,reason:e.target.value}))}
+                rows={3} placeholder="Explain why this correction is needed (e.g. forgot to clock out, system glitch, working offsite without access)…"
+                style={{ border:`1px solid ${C.silver}`, borderRadius:5, padding:'9px 12px', fontFamily:'var(--font)', fontSize:13, resize:'vertical', width:'100%', boxSizing:'border-box' }}/>
+              <div style={{ fontSize:11, color:C.lightGray, marginTop:4 }}>Required — this note will be shown to your manager with the request.</div>
+            </div>
+
+            <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+              <Btn variant="outline" onClick={()=>setRequestModal(false)}>Cancel</Btn>
+              <Btn onClick={submitEditRequest}>Submit for Approval</Btn>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* Deny Modal */}
+      <Modal open={denyModal} onClose={()=>{setDenyModal(false);setDenyTarget(null);setDenyReason('')}} title="Deny Edit Request" width={400}>
+        <p style={{ fontSize:13, color:C.midGray, marginBottom:16, lineHeight:1.6 }}>
+          Provide a reason so the employee understands why the edit was not approved.
+        </p>
+        <div style={{ marginBottom:16 }}>
+          <FormLabel>Reason for Denial <span style={{color:'#cc4444'}}>*</span></FormLabel>
+          <textarea value={denyReason} onChange={e=>setDenyReason(e.target.value)} rows={3}
+            placeholder="e.g. Hours do not match schedule, please resubmit with correct times…"
+            style={{ border:`1px solid ${C.silver}`, borderRadius:5, padding:'9px 12px', fontFamily:'var(--font)', fontSize:13, resize:'vertical', width:'100%', boxSizing:'border-box' }}/>
+        </div>
+        <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+          <Btn variant="outline" onClick={()=>{setDenyModal(false);setDenyTarget(null);setDenyReason('')}}>Cancel</Btn>
+          <Btn variant="danger" onClick={denyEdit}>Deny Request</Btn>
+        </div>
+      </Modal>
+    </div>
+  )
+}
+
 // ─── Root App ──────────────────────────────────────────────────
 export default function App() {
   const [session, setSession]   = useState(null)
@@ -1827,6 +2258,7 @@ export default function App() {
     ...(isManager?[{id:'dashboard',label:'Dashboard',icon:'⊞'}]:[]),
     {id:'clock',label:'Time Clock',icon:'◷'},
     ...(isManager?[{id:'timesheets',label:'Timesheets',icon:'☰'}]:[]),
+    {id:'editrequests',label:'Timesheet Edits',icon:'✎'},
     {id:'timeoff',label:'Time Off',icon:'◈'},
     {id:'pto',label:'PTO',icon:'◐'},
     {id:'holidays',label:'Holidays',icon:'◻'},
@@ -1930,6 +2362,7 @@ export default function App() {
           {page==='profile'    && <ProfilePage profile={profile} toast={toast} onUpdate={setProfile}/>}
           {page==='payperiods'  && <PayPeriodsPage profile={profile} toast={toast}/>}
           {page==='pto'         && <PTOPage profile={profile} toast={toast}/>}
+          {page==='editrequests' && <TimesheetEditPage profile={profile} toast={toast}/>}
         </main>
       </div>
 
