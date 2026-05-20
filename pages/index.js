@@ -239,16 +239,31 @@ function LoginPage({ onLogin, toast }) {
     setLoading(true); setErr('')
     try {
       const sb = getClient()
-      // Race login against 10-second timeout
+
+      // First test if Supabase is reachable at all
+      let canReach = false
+      try {
+        const testPromise = sb.from('holidays').select('count').limit(1)
+        const testTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+        await Promise.race([testPromise, testTimeout])
+        canReach = true
+      } catch(testErr) {
+        console.error('Supabase not reachable:', testErr)
+        setErr('Cannot reach the server. This is usually a configuration issue — not your internet connection. Please contact your admin.')
+        setLoading(false)
+        return
+      }
+
+      // Try login with 15 second timeout
       const loginPromise = sb.auth.signInWithPassword({ email, password: pw })
       const timeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Connection timed out. Check your internet connection and try again.')), 10000)
+        setTimeout(() => reject(new Error('Login timed out. The server is reachable but auth is slow — try again.')), 15000)
       )
       const { data, error } = await Promise.race([loginPromise, timeout])
       if (error) throw error
       if (!data?.user) throw new Error('Login failed — please try again')
       
-      // Fetch profile with timeout
+      // Fetch profile
       const { data: profileData } = await sb.from('profiles').select('*').eq('id', data.user.id).single()
       const d = profileData || {}
       const profile = {
@@ -306,7 +321,12 @@ function LoginPage({ onLogin, toast }) {
             <Input label="Work Email" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@company.com" required autoFocus/>
             <Input label="Password" type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="••••••••" required/>
             {err && (
-              <div style={{ background:'#fff0f0', color:'#cc4444', border:'1px solid #ffcccc', borderRadius:5, padding:'9px 12px', fontSize:12, marginBottom:14 }}>{err}</div>
+              <div style={{ background:'#fff0f0', color:'#cc4444', border:'1px solid #ffcccc', borderRadius:5, padding:'9px 12px', fontSize:12, marginBottom:14, lineHeight:1.5 }}>
+                {err}
+                <div style={{marginTop:6, fontSize:11, color:'#aa3333'}}>
+                  If this keeps happening, open your browser console (F12) and look for red errors, then share them with your admin.
+                </div>
+              </div>
             )}
             <Btn type="submit" disabled={loading} style={{ width:'100%', justifyContent:'center', padding:'12px 0', fontSize:14 }}>
               {loading ? 'Signing in…' : 'Sign In'}
