@@ -841,8 +841,12 @@ function AdminDashboard({ profile, toast }) {
 function TimesheetsPage({ profile, toast }) {
   const [entries, setEntries] = useState([])
   const [loading, setLoading] = useState(true)
-  const [status, setStatus] = useState('all')  // default to all so entries are visible
+  const [status, setStatus] = useState('all')
   const [weekOf, setWeekOf] = useState(weekStart().toISOString().split('T')[0])
+  const [addModal, setAddModal] = useState(false)
+  const [employees, setEmployees] = useState([])
+  const [addForm, setAddForm] = useState({ employeeId: profile.id, clockIn: '', clockOut: '', breakMins: 0, location: 'office', notes: '' })
+  const sb = getClient()
 
   useEffect(()=>{ load() }, [status, weekOf])
 
@@ -850,12 +854,38 @@ function TimesheetsPage({ profile, toast }) {
     setLoading(true)
     try {
       const from = new Date(weekOf+'T00:00:00').toISOString()
-      // Show 14 days instead of 7 so entries don't fall outside the window
       const to = new Date(new Date(weekOf).getTime()+14*86400000).toISOString()
       const data = await getAllEntries({ from, to, status: status==='all'?undefined:status })
       setEntries(data||[])
+      // Load employees for add entry dropdown
+      const { data: emps } = await sb.from('profiles').select('id,first_name,last_name').eq('is_active',true).order('first_name')
+      setEmployees(emps||[])
     } catch(e){ toast(e.message,'error') }
     finally { setLoading(false) }
+  }
+
+  async function handleAddEntry() {
+    if (!addForm.clockIn) { toast('Clock-in time is required','error'); return }
+    if (!addForm.clockOut) { toast('Clock-out time is required','error'); return }
+    const clockIn = new Date(addForm.clockIn).toISOString()
+    const clockOut = new Date(addForm.clockOut).toISOString()
+    if (clockOut <= clockIn) { toast('Clock-out must be after clock-in','error'); return }
+    try {
+      const { error } = await sb.from('time_entries').insert({
+        employee_id: addForm.employeeId,
+        clock_in: clockIn,
+        clock_out: clockOut,
+        break_mins: parseInt(addForm.breakMins)||0,
+        location: addForm.location,
+        notes: addForm.notes || 'Manual entry added by manager',
+        status: 'pending'
+      })
+      if (error) throw error
+      toast('Entry added — pending approval')
+      setAddModal(false)
+      setAddForm({ employeeId: profile.id, clockIn: '', clockOut: '', breakMins: 0, location: 'office', notes: '' })
+      load()
+    } catch(e){ toast(e.message,'error') }
   }
 
   return (
@@ -876,6 +906,7 @@ function TimesheetsPage({ profile, toast }) {
             <option value="approved">Approved</option>
             <option value="flagged">Flagged</option>
           </select>
+          <Btn onClick={()=>setAddModal(true)}>+ Add Entry</Btn>
         </div>
       </div>
       <Card>
@@ -914,6 +945,38 @@ function TimesheetsPage({ profile, toast }) {
           </div>
         )}
       </Card>
+
+      {/* Add Entry Modal */}
+      <Modal open={addModal} onClose={()=>setAddModal(false)} title="Add Timesheet Entry">
+        <p style={{fontSize:13,color:C.midGray,marginBottom:16,lineHeight:1.6}}>
+          Manually add a time entry for cases where an employee forgot to clock in or the system was unavailable. Entry will be submitted for approval.
+        </p>
+        <Select label="Employee" value={addForm.employeeId} onChange={e=>setAddForm(f=>({...f,employeeId:e.target.value}))}>
+          {employees.map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
+        </Select>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="Clock In" type="datetime-local" value={addForm.clockIn} onChange={e=>setAddForm(f=>({...f,clockIn:e.target.value}))}/>
+          <Input label="Clock Out" type="datetime-local" value={addForm.clockOut} onChange={e=>setAddForm(f=>({...f,clockOut:e.target.value}))}/>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="Break (minutes)" type="number" min="0" max="120" value={addForm.breakMins} onChange={e=>setAddForm(f=>({...f,breakMins:e.target.value}))} placeholder="0"/>
+          <Select label="Location" value={addForm.location} onChange={e=>setAddForm(f=>({...f,location:e.target.value}))}>
+            <option value="office">Office</option>
+            <option value="remote">Remote</option>
+            <option value="field">Field / Onsite</option>
+          </Select>
+        </div>
+        <div style={{marginBottom:16}}>
+          <FormLabel>Notes (optional)</FormLabel>
+          <textarea value={addForm.notes} onChange={e=>setAddForm(f=>({...f,notes:e.target.value}))} rows={2}
+            placeholder="e.g. Employee forgot to clock in, system was down…"
+            style={{border:`1px solid ${C.silver}`,borderRadius:5,padding:'9px 12px',fontFamily:'var(--font)',fontSize:13,resize:'vertical',width:'100%',boxSizing:'border-box'}}/>
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <Btn variant="outline" onClick={()=>setAddModal(false)}>Cancel</Btn>
+          <Btn onClick={handleAddEntry}>Add Entry</Btn>
+        </div>
+      </Modal>
     </div>
   )
 }
