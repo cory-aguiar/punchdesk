@@ -2337,108 +2337,91 @@ export default function App() {
     setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)), 3500)
   }, [])
 
-  useEffect(()=>{
-    const sb = getClient()
-    let profileCache = null  // cache so re-fires don't overwrite role
-    ;(async () => {
+  useEffect(() => {
+    // Bulletproof auth: uses only raw fetch, no Supabase JS auth
+    const SURL = 'https://lnnbeupwdgtemhbtahbw.supabase.co'
+    const SKEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxubmJldXB3ZGd0ZW1oYnRhaGJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNDE0NTQsImV4cCI6MjA5NDgxNzQ1NH0.O6qLkJi0vh3c0yU-ZYicz3ky9Hs6VQE4LEimQbM-1oA'
 
-    async function loadProfile(user) {
-      // Return cached profile if we already have it for this user
-      if (profileCache && profileCache.id === user.id) return profileCache
+    async function restoreSession() {
+      const token = localStorage.getItem('sb_access_token')
+      const userId = localStorage.getItem('sb_user_id')
+      if (!token || !userId) { setLoading(false); return }
 
       try {
-        const { data, error } = await sb
-          .from('profiles')
-          .select('*')
-          .eq('id', user.id)
-          .single()
-
-        if (error) console.error('Profile error:', error)
-        const d = data || {}
-        const p = {
-          id: user.id,
-          email: user.email || '',
-          first_name: d.first_name || user.email?.split('@')[0] || 'User',
-          last_name: d.last_name || '',
-          role: d.role || 'employee',
-          department: d.department || '',
-          employment_type: d.employment_type || 'fulltime',
-          pto_balance: d.pto_balance ?? 15,
-          pto_used: d.pto_used ?? 0,
-          is_active: d.is_active ?? true,
-          hourly_rate: d.hourly_rate || 0,
-        }
-        profileCache = p  // cache it
-        return p
-      } catch(e) {
-        console.error('Profile fetch failed:', e)
-        // If we have a cached profile, use it rather than resetting role
-        if (profileCache && profileCache.id === user.id) return profileCache
-        return {
-          id: user.id, email: user.email || '',
-          first_name: user.email?.split('@')[0] || 'User',
-          last_name: '', role: 'employee',
-          department: '', employment_type: 'fulltime',
-          pto_balance: 15, pto_used: 0, is_active: true, hourly_rate: 0,
-        }
-      }
-    }
-
-    const safetyTimer = setTimeout(() => setLoading(false), 6000)
-
-    // Check for stored token from raw fetch login
-    const storedToken = localStorage.getItem('sb_access_token')
-    const storedUserId = localStorage.getItem('sb_user_id')
-
-    if (storedToken && storedUserId) {
-      // We have a stored session — load profile directly
-      try {
-        const SURL = 'https://lnnbeupwdgtemhbtahbw.supabase.co'
-        const SKEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxubmJldXB3ZGd0ZW1oYnRhaGJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNDE0NTQsImV4cCI6MjA5NDgxNzQ1NH0.O6qLkJi0vh3c0yU-ZYicz3ky9Hs6VQE4LEimQbM-1oA'
-        const profileRes = await fetch(`${SURL}/rest/v1/profiles?id=eq.${storedUserId}&select=*`, {
-          headers: { 'apikey': SKEY, 'Authorization': `Bearer ${storedToken}` }
+        // Verify token still valid by fetching profile
+        const res = await fetch(`${SURL}/rest/v1/profiles?id=eq.${userId}&select=*`, {
+          headers: { 'apikey': SKEY, 'Authorization': `Bearer ${token}` }
         })
-        if (profileRes.ok) {
-          const profileArr = await profileRes.json()
-          const d = (profileArr && profileArr[0]) || {}
-          if (d.id) {
-            const p = {
-              id: storedUserId,
-              email: d.email || '',
-              first_name: d.first_name || d.email?.split('@')[0] || 'User',
-              last_name: d.last_name || '',
-              role: d.role || 'employee',
-              department: d.department || '',
-              employment_type: d.employment_type || 'fulltime',
-              pto_balance: d.pto_balance ?? 15,
-              pto_used: d.pto_used ?? 0,
-              is_active: d.is_active ?? true,
-              hourly_rate: d.hourly_rate || 0,
+
+        if (!res.ok) {
+          // Token expired — try to refresh
+          const refreshToken = localStorage.getItem('sb_refresh_token')
+          if (refreshToken) {
+            const refreshRes = await fetch(`${SURL}/auth/v1/token?grant_type=refresh_token`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'apikey': SKEY },
+              body: JSON.stringify({ refresh_token: refreshToken })
+            })
+            if (refreshRes.ok) {
+              const refreshData = await refreshRes.json()
+              localStorage.setItem('sb_access_token', refreshData.access_token)
+              localStorage.setItem('sb_refresh_token', refreshData.refresh_token)
+              // Retry profile fetch with new token
+              const retry = await fetch(`${SURL}/rest/v1/profiles?id=eq.${userId}&select=*`, {
+                headers: { 'apikey': SKEY, 'Authorization': `Bearer ${refreshData.access_token}` }
+              })
+              if (retry.ok) {
+                const arr = await retry.json()
+                if (arr?.[0]) { buildProfile(arr[0], userId); return }
+              }
             }
-            profileCache = p
-            setProfile(p)
-            setSession({ user: { id: storedUserId, email: d.email } })
-            setPage(['admin','manager'].includes(p.role) ? 'dashboard' : 'clock')
-            clearTimeout(safetyTimer)
-            setLoading(false)
-            return
           }
+          // Token expired and refresh failed — clear and show login
+          clearSession()
+          setLoading(false)
+          return
         }
-      } catch(e) { console.error('Stored session load failed:', e) }
+
+        const arr = await res.json()
+        if (arr?.[0]) { buildProfile(arr[0], userId); return }
+      } catch(e) {
+        console.error('Session restore error:', e)
+      }
+      setLoading(false)
     }
 
-    // No stored token — show login screen
-    clearTimeout(safetyTimer)
-    setLoading(false)
+    function buildProfile(d, userId) {
+      const p = {
+        id: userId,
+        email: d.email || '',
+        first_name: d.first_name || d.email?.split('@')[0] || 'User',
+        last_name: d.last_name || '',
+        role: d.role || 'employee',
+        department: d.department || '',
+        employment_type: d.employment_type || 'fulltime',
+        pto_balance: d.pto_balance ?? 15,
+        pto_used: d.pto_used ?? 0,
+        is_active: d.is_active ?? true,
+        hourly_rate: d.hourly_rate || 0,
+      }
+      setProfile(p)
+      setSession({ user: { id: userId, email: d.email } })
+      setPage(prev => prev === 'clock' && ['admin','manager'].includes(p.role) ? 'dashboard' : prev)
+      setLoading(false)
+    }
 
-    })() // end async IIFE
-    return ()=>{ clearTimeout(safetyTimer) }
-  },[])
+    restoreSession()
+  }, [])
 
-  async function handleSignOut() {
+
+  function clearSession() {
     localStorage.removeItem('sb_access_token')
     localStorage.removeItem('sb_refresh_token')
     localStorage.removeItem('sb_user_id')
+  }
+
+  async function handleSignOut() {
+    clearSession()
     setSession(null); setProfile(null); setPage('clock')
   }
 
