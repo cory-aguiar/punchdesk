@@ -1447,6 +1447,7 @@ function PayPeriodsPage({ profile, toast }) {
                           {[
                             ...(isManager ? ['Employee'] : []),
                             'Date','Location','Clock In','Clock Out','Break','Hours','Status'
+                          'Edit'
                           ].map(h=><TH key={h}>{h}</TH>)}
                         </tr>
                       </thead>
@@ -1467,6 +1468,7 @@ function PayPeriodsPage({ profile, toast }) {
                               <TD style={{ fontFamily:'var(--mono)', fontSize:12, color:C.midGray }}>{e.break_mins ? `${e.break_mins}m` : '—'}</TD>
                               <TD style={{ fontFamily:'var(--mono)', fontSize:12, fontWeight:600 }}>{Math.max(0,hrs).toFixed(2)}h</TD>
                               <TD><Badge variant={e.status==='approved'?'approved':e.status==='flagged'?'flagged':e.status==='active'?'active':'pending'}>{e.status}</Badge></TD>
+                              <TD><EditRequestButton entry={e} profile={profile} toast={toast}/></TD>
                             </tr>
                           )
                         })}
