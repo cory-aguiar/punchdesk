@@ -1305,6 +1305,434 @@ function PayPeriodsPage({ profile, toast }) {
   )
 }
 
+
+// ─── PTO Page ─────────────────────────────────────────────────
+function PTOPage({ profile, toast }) {
+  const isManager = ['admin','manager'].includes(profile.role)
+  const sb = getClient()
+
+  // Views
+  const [tab, setTab] = useState('my')        // 'my' | 'all'
+  const [typeTab, setTypeTab] = useState('pto') // 'pto' | 'bereavement'
+
+  // Data
+  const [myLedger, setMyLedger] = useState({ pto: [], bereavement: [] })
+  const [myBal, setMyBal] = useState({ pto: 0, bereavement: 0 })
+  const [allBalances, setAllBalances] = useState([])
+  const [allLedger, setAllLedger] = useState([])
+  const [employees, setEmployees] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  // Modals
+  const [openingModal, setOpeningModal] = useState(false)
+  const [accrualModal, setAccrualModal] = useState(false)
+  const [adjustModal, setAdjustModal] = useState(false)
+  const [openingForm, setOpeningForm] = useState({ employeeId: profile.id, ptoHours: '', bereavementHours: '' })
+  const [adjustForm, setAdjustForm] = useState({ employeeId: '', leaveType: 'pto', hours: '', notes: '' })
+
+  useEffect(() => { load() }, [tab])
+
+  async function load() {
+    setLoading(true)
+    try {
+      if (isManager) {
+        const { data: emps } = await sb.from('profiles').select('id,first_name,last_name').eq('is_active',true).order('first_name')
+        setEmployees(emps||[])
+      }
+
+      if (tab === 'my' || !isManager) {
+        const { data: rows } = await sb.from('pto_ledger')
+          .select('*').eq('employee_id', profile.id)
+          .order('entry_date', { ascending: false })
+          .order('created_at', { ascending: false })
+        const ptoRows = (rows||[]).filter(r => r.leave_type === 'pto')
+        const berRows = (rows||[]).filter(r => r.leave_type === 'bereavement')
+        setMyLedger({ pto: ptoRows, bereavement: berRows })
+        setMyBal({
+          pto: (rows||[]).filter(r=>r.leave_type==='pto').reduce((s,r)=>s+parseFloat(r.hours),0),
+          bereavement: (rows||[]).filter(r=>r.leave_type==='bereavement').reduce((s,r)=>s+parseFloat(r.hours),0)
+        })
+      }
+
+      if (tab === 'all' && isManager) {
+        const { data: bals } = await sb.from('pto_balances').select('*').order('full_name')
+        setAllBalances(bals||[])
+        const { data: ledger } = await sb.from('pto_ledger')
+          .select('*, profiles!pto_ledger_employee_id_fkey(first_name,last_name)')
+          .order('entry_date', { ascending: false }).order('created_at', { ascending: false }).limit(150)
+        setAllLedger(ledger||[])
+      }
+    } catch(e) { toast(e.message,'error') }
+    finally { setLoading(false) }
+  }
+
+  async function getBalance(empId, ltype) {
+    const { data } = await sb.from('pto_ledger').select('hours').eq('employee_id',empId).eq('leave_type',ltype)
+    return (data||[]).reduce((s,r)=>s+parseFloat(r.hours),0)
+  }
+
+  // Set opening balances for one employee
+  async function handleSetOpening() {
+    const { employeeId, ptoHours, bereavementHours } = openingForm
+    if (!employeeId) { toast('Select an employee','error'); return }
+    const today = new Date().toISOString().split('T')[0]
+    try {
+      const ops = []
+      if (ptoHours !== '') {
+        const h = parseFloat(ptoHours)
+        // Delete any existing opening entry for this employee+type first
+        await sb.from('pto_ledger').delete().eq('employee_id',employeeId).eq('leave_type','pto').eq('entry_type','opening')
+        // Recalculate balance: opening + everything else
+        const rest = await getBalance(employeeId,'pto')
+        ops.push(sb.from('pto_ledger').insert({
+          employee_id: employeeId, leave_type: 'pto', entry_date: today,
+          entry_type: 'opening', hours: h, balance_after: h,
+          notes: 'Opening balance set by manager', created_by: profile.id
+        }))
+      }
+      if (bereavementHours !== '') {
+        const h = parseFloat(bereavementHours)
+        await sb.from('pto_ledger').delete().eq('employee_id',employeeId).eq('leave_type','bereavement').eq('entry_type','opening')
+        ops.push(sb.from('pto_ledger').insert({
+          employee_id: employeeId, leave_type: 'bereavement', entry_date: today,
+          entry_type: 'opening', hours: h, balance_after: h,
+          notes: 'Opening balance set by manager', created_by: profile.id
+        }))
+      }
+      await Promise.all(ops)
+      toast('Opening balances saved')
+      setOpeningModal(false)
+      setOpeningForm({ employeeId: profile.id, ptoHours: '', bereavementHours: '' })
+      load()
+    } catch(e) { toast(e.message,'error') }
+  }
+
+  // Run bi-weekly PTO accrual for all employees
+  async function runAccrual() {
+    try {
+      const { data: settings } = await sb.from('pto_settings').select('*,profiles!pto_settings_employee_id_fkey(first_name,last_name)').eq('accrual_active',true)
+      if (!settings?.length) { toast('No active employees','error'); return }
+      const today = new Date().toISOString().split('T')[0]
+      let count = 0
+      for (const s of settings) {
+        const bal = await getBalance(s.employee_id,'pto')
+        const newBal = bal + parseFloat(s.pto_accrual_hours)
+        await sb.from('pto_ledger').insert({
+          employee_id: s.employee_id, leave_type: 'pto',
+          entry_date: today, entry_type: 'accrual',
+          hours: parseFloat(s.pto_accrual_hours), balance_after: newBal,
+          pay_period_start: today,
+          notes: `Bi-weekly accrual (${s.pto_accrual_hours}h)`, created_by: profile.id
+        })
+        count++
+      }
+      toast(`Accrued ${count} employees — 6.46h PTO each`)
+      setAccrualModal(false)
+      load()
+    } catch(e) { toast(e.message,'error') }
+  }
+
+  // Grant annual bereavement hours (Jan 1 each year)
+  async function grantBereavement() {
+    try {
+      const { data: settings } = await sb.from('pto_settings').select('*').eq('accrual_active',true)
+      const year = new Date().getFullYear()
+      const grantDate = `${year}-01-01`
+      let count = 0
+      for (const s of settings) {
+        // Check if already granted this year
+        const { data: existing } = await sb.from('pto_ledger')
+          .select('id').eq('employee_id',s.employee_id).eq('leave_type','bereavement')
+          .eq('entry_type','grant').gte('entry_date',`${year}-01-01`).lte('entry_date',`${year}-12-31`)
+        if (existing?.length) continue
+        const bal = await getBalance(s.employee_id,'bereavement')
+        await sb.from('pto_ledger').insert({
+          employee_id: s.employee_id, leave_type: 'bereavement',
+          entry_date: grantDate, entry_type: 'grant',
+          hours: parseFloat(s.bereavement_annual), balance_after: bal + parseFloat(s.bereavement_annual),
+          notes: `${year} annual bereavement grant`, created_by: profile.id
+        })
+        count++
+      }
+      toast(count ? `Granted 24h bereavement to ${count} employees` : 'Already granted this year')
+      load()
+    } catch(e) { toast(e.message,'error') }
+  }
+
+  // Manual adjustment
+  async function handleAdjust() {
+    if (!adjustForm.employeeId || !adjustForm.hours) { toast('Fill in all fields','error'); return }
+    try {
+      const h = parseFloat(adjustForm.hours)
+      const bal = await getBalance(adjustForm.employeeId, adjustForm.leaveType)
+      await sb.from('pto_ledger').insert({
+        employee_id: adjustForm.employeeId, leave_type: adjustForm.leaveType,
+        entry_date: new Date().toISOString().split('T')[0], entry_type: 'adjustment',
+        hours: h, balance_after: bal + h,
+        notes: adjustForm.notes || 'Manual adjustment', created_by: profile.id
+      })
+      toast('Adjustment saved')
+      setAdjustModal(false)
+      setAdjustForm({ employeeId:'', leaveType:'pto', hours:'', notes:'' })
+      load()
+    } catch(e) { toast(e.message,'error') }
+  }
+
+  const entryColor = { opening:'blue', accrual:'approved', grant:'purple', used:'flagged', adjustment:'active', carryover:'pending' }
+  const entryLabel = { opening:'Opening', accrual:'Accrual', grant:'Grant', used:'Used', adjustment:'Adjustment', carryover:'Carryover' }
+
+  function LedgerTable({ rows }) {
+    if (loading) return <div style={{color:C.lightGray,padding:'20px 0'}}>Loading…</div>
+    if (!rows.length) return <div style={{textAlign:'center',color:C.lightGray,padding:'32px 0',fontSize:13}}>No entries yet — set an opening balance to get started.</div>
+    return (
+      <div style={{overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr>{['Date','Type','Hours','Balance After','Notes'].map(h=><TH key={h}>{h}</TH>)}</tr></thead>
+          <tbody>
+            {rows.map(e=>(
+              <tr key={e.id}>
+                <TD style={{fontSize:12}}>{new Date(e.entry_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</TD>
+                <TD><Badge variant={entryColor[e.entry_type]||'default'}>{entryLabel[e.entry_type]||e.entry_type}</Badge></TD>
+                <TD style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:500,color:parseFloat(e.hours)>=0?C.black:'#cc4444'}}>
+                  {parseFloat(e.hours)>=0?'+':''}{parseFloat(e.hours).toFixed(2)}h
+                </TD>
+                <TD style={{fontFamily:'var(--mono)',fontSize:12}}>{parseFloat(e.balance_after).toFixed(2)}h</TD>
+                <TD style={{fontSize:12,color:C.midGray}}>{e.notes||'—'}</TD>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  // Group allBalances by employee
+  const empBalMap = {}
+  allBalances.forEach(b => {
+    if (!empBalMap[b.employee_id]) empBalMap[b.employee_id] = { name: b.full_name, dept: b.department, pto: null, bereavement: null }
+    if (b.leave_type) empBalMap[b.employee_id][b.leave_type] = b
+  })
+  // Add employees with no ledger entries yet
+  employees.forEach(e => {
+    if (!empBalMap[e.id]) empBalMap[e.id] = { name:`${e.first_name} ${e.last_name}`, dept:'', pto:null, bereavement:null }
+  })
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:20}}>
+        <div>
+          <div style={{fontSize:22,fontWeight:600,letterSpacing:-.4}}>PTO & Bereavement</div>
+          <div style={{fontSize:13,color:C.midGray,marginTop:3}}>PTO: 6.46h/period · Bereavement: 24h/year</div>
+        </div>
+        {isManager && (
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',justifyContent:'flex-end'}}>
+            <Btn variant="outline" size="sm" onClick={()=>setOpeningModal(true)}>Set Opening Balance</Btn>
+            <Btn variant="outline" size="sm" onClick={()=>setAdjustModal(true)}>± Adjust</Btn>
+            <Btn size="sm" onClick={()=>setAccrualModal(true)}>▶ Run PTO Accrual</Btn>
+            <Btn variant="purple" size="sm" onClick={grantBereavement}>◈ Grant Bereavement</Btn>
+          </div>
+        )}
+      </div>
+
+      {/* Main tab — My vs All */}
+      {isManager && (
+        <div style={{display:'flex',gap:4,background:C.offWhite,borderRadius:7,padding:4,marginBottom:20}}>
+          {[{id:'my',label:'My Leave'},{id:'all',label:'All Employees'}].map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{
+              flex:1,padding:'7px 14px',border:'none',cursor:'pointer',fontFamily:'var(--font)',fontSize:13,
+              borderRadius:6,transition:'all .14s',
+              background:tab===t.id?C.white:'transparent',color:tab===t.id?C.black:C.midGray,
+              fontWeight:tab===t.id?500:400,boxShadow:tab===t.id?'0 1px 3px rgba(0,0,0,.08)':'none'
+            }}>{t.label}</button>
+          ))}
+        </div>
+      )}
+
+      {/* MY LEAVE view */}
+      {(tab==='my'||!isManager) && (
+        <>
+          {/* Stat cards */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:20}}>
+            <Card>
+              <div style={{fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:.8,color:C.lightGray,marginBottom:8}}>PTO Balance</div>
+              <div style={{fontSize:36,fontWeight:600,fontFamily:'var(--mono)',letterSpacing:-2,color:C.black}}>{myBal.pto.toFixed(2)}<span style={{fontSize:16,fontWeight:400,color:C.midGray}}> hrs</span></div>
+              <div style={{fontSize:12,color:C.midGray,marginTop:4}}>Accrues 6.46h every pay period</div>
+            </Card>
+            <Card>
+              <div style={{fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:.8,color:C.lightGray,marginBottom:8}}>Bereavement Balance</div>
+              <div style={{fontSize:36,fontWeight:600,fontFamily:'var(--mono)',letterSpacing:-2,color:C.black}}>{myBal.bereavement.toFixed(2)}<span style={{fontSize:16,fontWeight:400,color:C.midGray}}> hrs</span></div>
+              <div style={{fontSize:12,color:C.midGray,marginTop:4}}>24h granted January 1st each year</div>
+            </Card>
+          </div>
+
+          {/* Type sub-tabs */}
+          <div style={{display:'flex',gap:4,background:C.offWhite,borderRadius:7,padding:4,marginBottom:16}}>
+            {[{id:'pto',label:'PTO Ledger'},{id:'bereavement',label:'Bereavement Ledger'}].map(t=>(
+              <button key={t.id} onClick={()=>setTypeTab(t.id)} style={{
+                flex:1,padding:'7px 14px',border:'none',cursor:'pointer',fontFamily:'var(--font)',fontSize:13,
+                borderRadius:6,transition:'all .14s',
+                background:typeTab===t.id?C.white:'transparent',color:typeTab===t.id?C.black:C.midGray,
+                fontWeight:typeTab===t.id?500:400,boxShadow:typeTab===t.id?'0 1px 3px rgba(0,0,0,.08)':'none'
+              }}>{t.label}</button>
+            ))}
+          </div>
+          <Card>
+            <LedgerTable rows={typeTab==='pto'?myLedger.pto:myLedger.bereavement}/>
+          </Card>
+        </>
+      )}
+
+      {/* ALL EMPLOYEES view */}
+      {tab==='all'&&isManager&&(
+        <>
+          {/* Balance summary table */}
+          <Card style={{marginBottom:16}}>
+            <CardHeader title="All Employee Balances"/>
+            {loading ? <div style={{color:C.lightGray}}>Loading…</div> : (
+              <div style={{overflowX:'auto'}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+                  <thead>
+                    <tr>
+                      {['Employee','Dept','PTO Balance','PTO Used','Bereavement Balance','Bereavement Used'].map(h=><TH key={h}>{h}</TH>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(empBalMap).map(([id,e])=>(
+                      <tr key={id}>
+                        <TD style={{fontWeight:500}}>{e.name}</TD>
+                        <TD style={{color:C.midGray,fontSize:12}}>{e.dept||'—'}</TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:600,color:parseFloat(e.pto?.current_balance||0)>0?C.black:'#cc4444'}}>
+                          {parseFloat(e.pto?.current_balance||0).toFixed(2)}h
+                        </TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12,color:'#cc4444'}}>
+                          {parseFloat(e.pto?.total_used||0).toFixed(2)}h
+                        </TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:600,color:parseFloat(e.bereavement?.current_balance||0)>0?C.black:'#cc4444'}}>
+                          {parseFloat(e.bereavement?.current_balance||0).toFixed(2)}h
+                        </TD>
+                        <TD style={{fontFamily:'var(--mono)',fontSize:12,color:'#cc4444'}}>
+                          {parseFloat(e.bereavement?.total_used||0).toFixed(2)}h
+                        </TD>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          {/* Full ledger sub-tabs */}
+          <div style={{display:'flex',gap:4,background:C.offWhite,borderRadius:7,padding:4,marginBottom:16}}>
+            {[{id:'pto',label:'PTO Ledger'},{id:'bereavement',label:'Bereavement Ledger'}].map(t=>(
+              <button key={t.id} onClick={()=>setTypeTab(t.id)} style={{
+                flex:1,padding:'7px 14px',border:'none',cursor:'pointer',fontFamily:'var(--font)',fontSize:13,
+                borderRadius:6,transition:'all .14s',
+                background:typeTab===t.id?C.white:'transparent',color:typeTab===t.id?C.black:C.midGray,
+                fontWeight:typeTab===t.id?500:400,boxShadow:typeTab===t.id?'0 1px 3px rgba(0,0,0,.08)':'none'
+              }}>{t.label}</button>
+            ))}
+          </div>
+          <Card>
+            <CardHeader title={`${typeTab==='pto'?'PTO':'Bereavement'} Ledger — All Employees`} right="Last 150 entries"/>
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+                <thead><tr>{['Date','Employee','Type','Hours','Balance After','Notes'].map(h=><TH key={h}>{h}</TH>)}</tr></thead>
+                <tbody>
+                  {allLedger.filter(e=>e.leave_type===typeTab).length===0&&(
+                    <tr><TD colSpan={6} style={{textAlign:'center',color:C.lightGray,padding:32}}>No entries yet</TD></tr>
+                  )}
+                  {allLedger.filter(e=>e.leave_type===typeTab).map(e=>(
+                    <tr key={e.id}>
+                      <TD style={{fontSize:12}}>{new Date(e.entry_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</TD>
+                      <TD style={{fontWeight:500,fontSize:12}}>{e.profiles?.first_name} {e.profiles?.last_name}</TD>
+                      <TD><Badge variant={entryColor[e.entry_type]||'default'}>{entryLabel[e.entry_type]||e.entry_type}</Badge></TD>
+                      <TD style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:500,color:parseFloat(e.hours)>=0?C.black:'#cc4444'}}>
+                        {parseFloat(e.hours)>=0?'+':''}{parseFloat(e.hours).toFixed(2)}h
+                      </TD>
+                      <TD style={{fontFamily:'var(--mono)',fontSize:12}}>{parseFloat(e.balance_after).toFixed(2)}h</TD>
+                      <TD style={{fontSize:12,color:C.midGray}}>{e.notes||'—'}</TD>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </>
+      )}
+
+      {/* ── Modals ── */}
+
+      {/* Set Opening Balance */}
+      <Modal open={openingModal} onClose={()=>setOpeningModal(false)} title="Set Opening Balance">
+        <p style={{fontSize:13,color:C.midGray,marginBottom:18,lineHeight:1.6}}>
+          Enter the current accrued hours to kick off tracking. This replaces any existing opening entry.
+        </p>
+        <Select label="Employee" value={openingForm.employeeId} onChange={e=>setOpeningForm(f=>({...f,employeeId:e.target.value}))}>
+          {employees.map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
+        </Select>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+          <Input label="PTO Hours" type="number" step="0.01" min="0"
+            value={openingForm.ptoHours} onChange={e=>setOpeningForm(f=>({...f,ptoHours:e.target.value}))}
+            placeholder="e.g. 48.00"/>
+          <Input label="Bereavement Hours" type="number" step="0.01" min="0"
+            value={openingForm.bereavementHours} onChange={e=>setOpeningForm(f=>({...f,bereavementHours:e.target.value}))}
+            placeholder="e.g. 24.00"/>
+        </div>
+        <div style={{background:C.offWhite,border:`1px solid ${C.silver}`,borderRadius:5,padding:'10px 14px',fontSize:12,color:C.midGray,marginBottom:16}}>
+          Leave a field blank to skip updating that balance type.
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <Btn variant="outline" onClick={()=>setOpeningModal(false)}>Cancel</Btn>
+          <Btn onClick={handleSetOpening}>Save Opening Balance</Btn>
+        </div>
+      </Modal>
+
+      {/* Run PTO Accrual */}
+      <Modal open={accrualModal} onClose={()=>setAccrualModal(false)} title="Run Pay Period Accrual" width={400}>
+        <p style={{fontSize:13,color:C.midGray,marginBottom:16,lineHeight:1.6}}>
+          Adds <strong>6.46 PTO hours</strong> to every active employee's balance for the current pay period.
+        </p>
+        <div style={{background:C.offWhite,border:`1px solid ${C.silver}`,borderRadius:5,padding:'12px 14px',fontSize:12,color:C.midGray,marginBottom:18}}>
+          Run this once per pay period on payday. Set a reminder every two weeks.
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <Btn variant="outline" onClick={()=>setAccrualModal(false)}>Cancel</Btn>
+          <Btn onClick={runAccrual}>Run Accrual for All Employees</Btn>
+        </div>
+      </Modal>
+
+      {/* Manual Adjustment */}
+      <Modal open={adjustModal} onClose={()=>setAdjustModal(false)} title="Manual Adjustment">
+        <p style={{fontSize:13,color:C.midGray,marginBottom:16,lineHeight:1.6}}>
+          Add or deduct hours. Use a negative number to deduct.
+        </p>
+        <Select label="Employee" value={adjustForm.employeeId} onChange={e=>setAdjustForm(f=>({...f,employeeId:e.target.value}))}>
+          <option value="">Select employee…</option>
+          {employees.map(e=><option key={e.id} value={e.id}>{e.first_name} {e.last_name}</option>)}
+        </Select>
+        <Select label="Leave Type" value={adjustForm.leaveType} onChange={e=>setAdjustForm(f=>({...f,leaveType:e.target.value}))}>
+          <option value="pto">PTO</option>
+          <option value="bereavement">Bereavement</option>
+        </Select>
+        <Input label="Hours (negative to deduct)" type="number" step="0.01"
+          value={adjustForm.hours} onChange={e=>setAdjustForm(f=>({...f,hours:e.target.value}))} placeholder="e.g. 8 or -4"/>
+        <div style={{marginBottom:16}}>
+          <FormLabel>Reason</FormLabel>
+          <textarea value={adjustForm.notes} onChange={e=>setAdjustForm(f=>({...f,notes:e.target.value}))} rows={2}
+            placeholder="e.g. Correction, bonus hours…"
+            style={{border:`1px solid ${C.silver}`,borderRadius:5,padding:'9px 12px',fontFamily:'var(--font)',fontSize:13,resize:'vertical',width:'100%',boxSizing:'border-box'}}/>
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <Btn variant="outline" onClick={()=>setAdjustModal(false)}>Cancel</Btn>
+          <Btn onClick={handleAdjust}>Save Adjustment</Btn>
+        </div>
+      </Modal>
+    </div>
+  )
+}
+
+
 // ─── Root App ──────────────────────────────────────────────────
 export default function App() {
   const [session, setSession]   = useState(null)
@@ -1400,6 +1828,7 @@ export default function App() {
     {id:'clock',label:'Time Clock',icon:'◷'},
     ...(isManager?[{id:'timesheets',label:'Timesheets',icon:'☰'}]:[]),
     {id:'timeoff',label:'Time Off',icon:'◈'},
+    {id:'pto',label:'PTO',icon:'◐'},
     {id:'holidays',label:'Holidays',icon:'◻'},
     {id:'payperiods',label:'Pay Periods',icon:'◑'},
     ...(isManager?[{id:'employees',label:'Employees',icon:'◎'}]:[]),
@@ -1500,6 +1929,7 @@ export default function App() {
           {page==='employees'  && isManager && <EmployeesPage profile={profile} toast={toast}/>}
           {page==='profile'    && <ProfilePage profile={profile} toast={toast} onUpdate={setProfile}/>}
           {page==='payperiods'  && <PayPeriodsPage profile={profile} toast={toast}/>}
+          {page==='pto'         && <PTOPage profile={profile} toast={toast}/>}
         </main>
       </div>
 
