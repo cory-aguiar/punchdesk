@@ -994,6 +994,317 @@ function ProfilePage({ profile, toast, onUpdate }) {
   )
 }
 
+// ─── Pay Periods Page ─────────────────────────────────────────
+function PayPeriodsPage({ profile, toast }) {
+  const isManager = ['admin','manager'].includes(profile.role)
+
+  // Generate bi-weekly pay periods
+  // Anchor: period starting 12/28/2025, ending 01/10/2026, payday 01/14/2026
+  // Payday is always 4 days after period end
+  function generatePeriods() {
+    const anchor = new Date('2025-12-28T12:00:00')
+    const periods = []
+    const today = new Date()
+    let start = new Date(anchor)
+    for (let i = 0; i < 52; i++) {
+      const end = new Date(start)
+      end.setDate(end.getDate() + 13) // 14-day period (day 0 to day 13)
+      const payday = new Date(end)
+      payday.setDate(payday.getDate() + 4) // Payday 4 days after period end
+      periods.push({ start: new Date(start), end: new Date(end), payday: new Date(payday) })
+      start.setDate(start.getDate() + 14)
+    }
+    // Return periods sorted newest first, only up to 1 future period
+    return periods
+      .filter(p => p.start <= new Date(today.getTime() + 14 * 86400000))
+      .reverse()
+  }
+
+  const periods = generatePeriods()
+  const today = new Date()
+
+  function isCurrent(p) {
+    return p.start <= today && today <= p.end
+  }
+
+  function isPending(p) {
+    // Period ended but payday hasn't arrived yet
+    return p.end < today && today < p.payday
+  }
+
+  function fmtPeriod(p) {
+    const opts = { month: 'short', day: 'numeric' }
+    return `${p.start.toLocaleDateString('en-US', opts)} – ${p.end.toLocaleDateString('en-US', { ...opts, year: 'numeric' })}`
+  }
+
+  function fmtPayday(p) {
+    return p.payday.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  }
+
+  const [selectedPeriod, setSelectedPeriod] = useState(periods[0] || null)
+  const [entries, setEntries] = useState([])
+  const [employees, setEmployees] = useState([])
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => { if (selectedPeriod) loadEntries(selectedPeriod) }, [selectedPeriod])
+
+  async function loadEntries(period) {
+    setLoading(true)
+    try {
+      const sb = getClient()
+      let q = sb.from('time_entries')
+        .select('*, profiles!time_entries_employee_id_fkey(first_name, last_name, department, employment_type, hourly_rate)')
+        .gte('clock_in', period.start.toISOString())
+        .lte('clock_in', new Date(period.end.getTime() + 86400000).toISOString())
+        .not('clock_out', 'is', null)
+        .order('clock_in', { ascending: true })
+
+      // Employees only see their own
+      if (!isManager) q = q.eq('employee_id', profile.id)
+
+      const { data, error } = await q
+      if (error) throw error
+      setEntries(data || [])
+
+      // Group by employee for summary
+      const empMap = {}
+      ;(data || []).forEach(e => {
+        const id = e.employee_id
+        if (!empMap[id]) {
+          empMap[id] = {
+            id,
+            name: `${e.profiles?.first_name || ''} ${e.profiles?.last_name || ''}`.trim(),
+            dept: e.profiles?.department || '—',
+            entries: [],
+            totalMins: 0,
+          }
+        }
+        const mins = ((new Date(e.clock_out) - new Date(e.clock_in)) / 60000) - (e.break_mins || 0)
+        empMap[id].entries.push(e)
+        empMap[id].totalMins += Math.max(0, mins)
+      })
+      setEmployees(Object.values(empMap))
+    } catch(e) { toast(e.message, 'error') }
+    finally { setLoading(false) }
+  }
+
+  function fmtHrs(mins) {
+    const h = Math.floor(mins / 60), m = Math.round(mins % 60)
+    return `${h}h ${m > 0 ? m + 'm' : ''}`.trim()
+  }
+
+  function exportCSV() {
+    if (!entries.length) { toast('No entries to export', 'error'); return }
+
+    // Build CSV rows
+    const periodLabel = fmtPeriod(selectedPeriod)
+    const paydayLabel = fmtPayday(selectedPeriod)
+    const rows = [
+      [`Pay Period: ${periodLabel}`],
+      [`Payday: ${paydayLabel}`],
+      [],
+      ['Employee', 'Department', 'Date', 'Clock In', 'Clock Out', 'Break (min)', 'Hours', 'Status']
+    ]
+    entries.forEach(e => {
+      const hrs = ((new Date(e.clock_out) - new Date(e.clock_in)) / 3600000) - (e.break_mins || 0) / 60
+      rows.push([
+        `${e.profiles?.first_name || ''} ${e.profiles?.last_name || ''}`.trim(),
+        e.profiles?.department || '',
+        new Date(e.clock_in).toLocaleDateString('en-US'),
+        formatTime(e.clock_in),
+        formatTime(e.clock_out),
+        e.break_mins || 0,
+        Math.max(0, hrs).toFixed(2),
+        e.status,
+      ])
+    })
+
+    // Add summary rows
+    rows.push([])
+    rows.push(['SUMMARY'])
+    rows.push(['Employee', 'Department', 'Total Hours'])
+    employees.forEach(emp => {
+      rows.push([emp.name, emp.dept, (emp.totalMins / 60).toFixed(2)])
+    })
+
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `payperiod-${selectedPeriod.start.toISOString().split('T')[0]}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast('CSV downloaded')
+  }
+
+  return (
+    <div>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:20 }}>
+        <div>
+          <div style={{ fontSize:22, fontWeight:600, letterSpacing:-.4 }}>Pay Periods</div>
+          <div style={{ fontSize:13, color:C.midGray, marginTop:3 }}>Bi-weekly · {isManager ? 'All employees' : 'My timesheet'}</div>
+        </div>
+        <Btn onClick={exportCSV}>↓ Export CSV</Btn>
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'240px 1fr', gap:16, alignItems:'start' }}>
+
+        {/* Period selector */}
+        <Card style={{ padding:0, overflow:'hidden' }}>
+          <div style={{ padding:'14px 16px', borderBottom:`1px solid ${C.silver}`, fontSize:11, fontWeight:600, textTransform:'uppercase', letterSpacing:.8, color:C.lightGray }}>
+            Select Period
+          </div>
+          <div style={{ maxHeight:480, overflowY:'auto' }}>
+            {periods.map((p, i) => {
+              const current = isCurrent(p)
+              const selected = selectedPeriod && p.start.getTime() === selectedPeriod.start.getTime()
+              return (
+                <div key={i} onClick={() => setSelectedPeriod(p)} style={{
+                  padding:'12px 16px', cursor:'pointer', borderBottom:`1px solid ${C.offWhite}`,
+                  background: selected ? C.black : 'transparent',
+                  color: selected ? C.white : C.text,
+                  transition:'all .12s',
+                }}>
+                  <div style={{ fontSize:13, fontWeight: current || selected ? 600 : 400 }}>
+                    {fmtPeriod(p)}
+                  </div>
+                  <div style={{ fontSize:10, marginTop:3, color: selected ? '#aaa' : C.lightGray, letterSpacing:.3 }}>
+                    Payday: {fmtPayday(p)}
+                  </div>
+                  {current && (
+                    <div style={{ fontSize:10, marginTop:2, color: selected ? '#6fcf97' : C.midGray, textTransform:'uppercase', letterSpacing:.5, fontWeight:600 }}>
+                      ● Current Period
+                    </div>
+                  )}
+                  {!current && isPending(p) && (
+                    <div style={{ fontSize:10, marginTop:2, color: selected ? '#f0c060' : C.midGray, textTransform:'uppercase', letterSpacing:.5, fontWeight:600 }}>
+                      ● Awaiting Payday
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </Card>
+
+        {/* Period detail */}
+        <div>
+          {selectedPeriod && (
+            <>
+              {/* Summary cards */}
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginBottom:16 }}>
+                <StatCard
+                  label="Period"
+                  value={fmtPeriod(selectedPeriod).split('–')[0].trim()}
+                  sub={`ends ${fmtPeriod(selectedPeriod).split('–')[1].trim()}`}
+                />
+                <StatCard
+                  label="Payday"
+                  value={selectedPeriod.payday.toLocaleDateString('en-US',{month:'short',day:'numeric'})}
+                  sub={selectedPeriod.payday.getFullYear()}
+                />
+                <StatCard
+                  label="Total Hours"
+                  value={fmtHrs(employees.reduce((s,e)=>s+e.totalMins,0))}
+                  sub={`across ${employees.length} employee${employees.length!==1?'s':''}`}
+                />
+                <StatCard
+                  label="Entries"
+                  value={entries.length}
+                  sub="clock-in records"
+                />
+              </div>
+
+              {/* Employee summary */}
+              {isManager && employees.length > 0 && (
+                <Card style={{ marginBottom:16 }}>
+                  <CardHeader title="Employee Summary"/>
+                  <div style={{ overflowX:'auto' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+                      <thead>
+                        <tr>{['Employee','Department','Shifts','Total Hours'].map(h=><TH key={h}>{h}</TH>)}</tr>
+                      </thead>
+                      <tbody>
+                        {employees.map(emp => (
+                          <tr key={emp.id}>
+                            <TD style={{ fontWeight:500 }}>{emp.name}</TD>
+                            <TD style={{ color:C.midGray }}>{emp.dept}</TD>
+                            <TD style={{ fontFamily:'var(--mono)', fontSize:12 }}>{emp.entries.length}</TD>
+                            <TD style={{ fontFamily:'var(--mono)', fontSize:12, fontWeight:600 }}>{fmtHrs(emp.totalMins)}</TD>
+                          </tr>
+                        ))}
+                        {/* Totals row */}
+                        <tr style={{ borderTop:`2px solid ${C.silver}` }}>
+                          <TD style={{ fontWeight:600 }}>Total</TD>
+                          <TD/>
+                          <TD style={{ fontFamily:'var(--mono)', fontSize:12, fontWeight:600 }}>{entries.length}</TD>
+                          <TD style={{ fontFamily:'var(--mono)', fontSize:12, fontWeight:600 }}>
+                            {fmtHrs(employees.reduce((s,e)=>s+e.totalMins,0))}
+                          </TD>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+              )}
+
+              {/* Detailed entries */}
+              <Card>
+                <CardHeader
+                  title={`All Entries · ${fmtPeriod(selectedPeriod)}`}
+                  right={loading ? 'Loading…' : `${entries.length} entries`}
+                />
+                {loading ? (
+                  <div style={{ color:C.lightGray, fontSize:13, padding:'20px 0', textAlign:'center' }}>Loading…</div>
+                ) : entries.length === 0 ? (
+                  <div style={{ color:C.lightGray, fontSize:13, padding:'32px 0', textAlign:'center' }}>
+                    No entries for this pay period
+                  </div>
+                ) : (
+                  <div style={{ overflowX:'auto' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
+                      <thead>
+                        <tr>
+                          {[
+                            ...(isManager ? ['Employee'] : []),
+                            'Date','Location','Clock In','Clock Out','Break','Hours','Status'
+                          ].map(h=><TH key={h}>{h}</TH>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {entries.map(e => {
+                          const hrs = ((new Date(e.clock_out) - new Date(e.clock_in)) / 3600000) - (e.break_mins||0)/60
+                          return (
+                            <tr key={e.id}>
+                              {isManager && (
+                                <TD style={{ fontWeight:500 }}>
+                                  {e.profiles?.first_name} {e.profiles?.last_name}
+                                </TD>
+                              )}
+                              <TD style={{ fontSize:12 }}>{formatDate(e.clock_in)}</TD>
+                              <TD style={{ fontSize:11, color:C.midGray, textTransform:'uppercase', letterSpacing:.3 }}>{e.location||'—'}</TD>
+                              <TD style={{ fontFamily:'var(--mono)', fontSize:12 }}>{formatTime(e.clock_in)}</TD>
+                              <TD style={{ fontFamily:'var(--mono)', fontSize:12 }}>{formatTime(e.clock_out)}</TD>
+                              <TD style={{ fontFamily:'var(--mono)', fontSize:12, color:C.midGray }}>{e.break_mins ? `${e.break_mins}m` : '—'}</TD>
+                              <TD style={{ fontFamily:'var(--mono)', fontSize:12, fontWeight:600 }}>{Math.max(0,hrs).toFixed(2)}h</TD>
+                              <TD><Badge variant={e.status==='approved'?'approved':e.status==='flagged'?'flagged':e.status==='active'?'active':'pending'}>{e.status}</Badge></TD>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Root App ──────────────────────────────────────────────────
 export default function App() {
   const [session, setSession]   = useState(null)
@@ -1090,6 +1401,7 @@ export default function App() {
     ...(isManager?[{id:'timesheets',label:'Timesheets',icon:'☰'}]:[]),
     {id:'timeoff',label:'Time Off',icon:'◈'},
     {id:'holidays',label:'Holidays',icon:'◻'},
+    {id:'payperiods',label:'Pay Periods',icon:'◑'},
     ...(isManager?[{id:'employees',label:'Employees',icon:'◎'}]:[]),
     {id:'profile',label:'My Profile',icon:'⊙'},
   ]
@@ -1187,6 +1499,7 @@ export default function App() {
           {page==='holidays'   && <HolidaysPage profile={profile} toast={toast}/>}
           {page==='employees'  && isManager && <EmployeesPage profile={profile} toast={toast}/>}
           {page==='profile'    && <ProfilePage profile={profile} toast={toast} onUpdate={setProfile}/>}
+          {page==='payperiods'  && <PayPeriodsPage profile={profile} toast={toast}/>}
         </main>
       </div>
 
