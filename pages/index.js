@@ -254,14 +254,16 @@ function LoginPage({ onLogin, toast }) {
       if (!authRes.ok) throw new Error(authData.error_description || authData.msg || 'Invalid email or password')
       
       const accessToken = authData.access_token
+      const refreshToken = authData.refresh_token
       const userId = authData.user?.id
       if (!userId) throw new Error('Login failed — no user returned')
 
-      // Store the session token so Supabase client can use it
-      const sb = getClient()
-      await sb.auth.setSession({ access_token: accessToken, refresh_token: authData.refresh_token })
+      // Store tokens in localStorage manually so the app can use them
+      localStorage.setItem('sb_access_token', accessToken)
+      localStorage.setItem('sb_refresh_token', refreshToken)
+      localStorage.setItem('sb_user_id', userId)
 
-      // Fetch profile using raw fetch with the access token
+      // Fetch profile using raw fetch — no Supabase JS client needed
       const profileRes = await fetch(`${SURL}/rest/v1/profiles?id=eq.${userId}&select=*`, {
         headers: {
           'apikey': SKEY,
@@ -2383,49 +2385,60 @@ export default function App() {
 
     const safetyTimer = setTimeout(() => setLoading(false), 6000)
 
-    sb.auth.getSession().then(async({data:{session}})=>{
-      clearTimeout(safetyTimer)
-      setSession(session)
-      if (session?.user) {
-        const p = await loadProfile(session.user)
-        setProfile(p)
-        setPage(prev => {
-          // Only set page on first load (prev is the default 'clock')
-          if (prev === 'clock' && ['admin','manager'].includes(p.role)) return 'dashboard'
-          return prev
+    // Check for stored token from raw fetch login
+    const storedToken = localStorage.getItem('sb_access_token')
+    const storedUserId = localStorage.getItem('sb_user_id')
+
+    if (storedToken && storedUserId) {
+      // We have a stored session — load profile directly
+      try {
+        const SURL = 'https://lnnbeupwdgtemhbtahbw.supabase.co'
+        const SKEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxubmJldXB3ZGd0ZW1oYnRhaGJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNDE0NTQsImV4cCI6MjA5NDgxNzQ1NH0.O6qLkJi0vh3c0yU-ZYicz3ky9Hs6VQE4LEimQbM-1oA'
+        const profileRes = await fetch(`${SURL}/rest/v1/profiles?id=eq.${storedUserId}&select=*`, {
+          headers: { 'apikey': SKEY, 'Authorization': `Bearer ${storedToken}` }
         })
-      }
-      setLoading(false)
-    }).catch(e => {
-      console.error('getSession failed:', e)
-      clearTimeout(safetyTimer)
-      setLoading(false)
-    })
-
-    const {data:{subscription}} = sb.auth.onAuthStateChange(async(event, session)=>{
-      // Ignore TOKEN_REFRESHED — this fires every hour and causes the role reset
-      if (event === 'TOKEN_REFRESHED') return
-
-      setSession(session)
-      if (session?.user) {
-        const p = await loadProfile(session.user)
-        setProfile(p)
-        // Only navigate on actual sign-in, not on every state change
-        if (event === 'SIGNED_IN') {
-          setPage(['admin','manager'].includes(p.role) ? 'dashboard' : 'clock')
+        if (profileRes.ok) {
+          const profileArr = await profileRes.json()
+          const d = (profileArr && profileArr[0]) || {}
+          if (d.id) {
+            const p = {
+              id: storedUserId,
+              email: d.email || '',
+              first_name: d.first_name || d.email?.split('@')[0] || 'User',
+              last_name: d.last_name || '',
+              role: d.role || 'employee',
+              department: d.department || '',
+              employment_type: d.employment_type || 'fulltime',
+              pto_balance: d.pto_balance ?? 15,
+              pto_used: d.pto_used ?? 0,
+              is_active: d.is_active ?? true,
+              hourly_rate: d.hourly_rate || 0,
+            }
+            profileCache = p
+            setProfile(p)
+            setSession({ user: { id: storedUserId, email: d.email } })
+            setPage(['admin','manager'].includes(p.role) ? 'dashboard' : 'clock')
+            clearTimeout(safetyTimer)
+            setLoading(false)
+            return
+          }
         }
-      } else if (event === 'SIGNED_OUT') {
-        profileCache = null
-        setProfile(null)
-        setPage('clock')
-      }
-      setLoading(false)
-    })
+      } catch(e) { console.error('Stored session load failed:', e) }
+    }
 
-    return ()=>{ subscription.unsubscribe(); clearTimeout(safetyTimer) }
+    // No stored token — show login screen
+    clearTimeout(safetyTimer)
+    setLoading(false)
+
+    return ()=>{ clearTimeout(safetyTimer) }
   },[])
 
-  async function handleSignOut() { await signOut(); setSession(null); setProfile(null) }
+  async function handleSignOut() {
+    localStorage.removeItem('sb_access_token')
+    localStorage.removeItem('sb_refresh_token')
+    localStorage.removeItem('sb_user_id')
+    setSession(null); setProfile(null); setPage('clock')
+  }
 
   if (loading) return (
     <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', background:C.offWhite }}>
