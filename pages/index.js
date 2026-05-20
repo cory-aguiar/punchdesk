@@ -1010,18 +1010,33 @@ export default function App() {
 
   useEffect(()=>{
     const sb = getClient()
+
+    async function loadProfile(user) {
+      try {
+        const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single()
+        if (error) { console.error('Profile error:', error); return null }
+        return data
+      } catch(e) { console.error('Profile fetch failed:', e); return null }
+    }
+
     sb.auth.getSession().then(async({data:{session}})=>{
       setSession(session)
       if (session?.user) {
-        try { const p = await getProfile(session.user.id); setProfile(p); setPage(['admin','manager'].includes(p.role)?'dashboard':'clock') }
-        catch(e){ console.error(e) }
+        const p = await loadProfile(session.user)
+        if (p) { setProfile(p); setPage(['admin','manager'].includes(p.role)?'dashboard':'clock') }
       }
       setLoading(false)
     })
+
     const {data:{subscription}} = sb.auth.onAuthStateChange(async(event,session)=>{
       setSession(session)
-      if (session?.user) { const p = await getProfile(session.user.id); setProfile(p); setPage(['admin','manager'].includes(p.role)?'dashboard':'clock') }
-      else { setProfile(null); setPage('clock') }
+      if (session?.user) {
+        const p = await loadProfile(session.user)
+        if (p) { setProfile(p); setPage(['admin','manager'].includes(p.role)?'dashboard':'clock') }
+        else { setLoading(false) }
+      } else {
+        setProfile(null); setPage('clock'); setLoading(false)
+      }
     })
     return ()=>subscription.unsubscribe()
   },[])
