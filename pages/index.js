@@ -1446,8 +1446,7 @@ function PayPeriodsPage({ profile, toast }) {
                         <tr>
                           {[
                             ...(isManager ? ['Employee'] : []),
-                            'Date','Location','Clock In','Clock Out','Break','Hours','Status'
-                          'Edit'
+                            'Date','Location','Clock In','Clock Out','Break','Hours','Status','Edit'
                           ].map(h=><TH key={h}>{h}</TH>)}
                         </tr>
                       </thead>
