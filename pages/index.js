@@ -238,9 +238,33 @@ function LoginPage({ onLogin, toast }) {
     e.preventDefault()
     setLoading(true); setErr('')
     try {
-      const { user } = await signIn(email, pw)
-      const profile = await getProfile(user.id)
-      onLogin(user, profile)
+      const sb = getClient()
+      // Race login against 10-second timeout
+      const loginPromise = sb.auth.signInWithPassword({ email, password: pw })
+      const timeout = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Connection timed out. Check your internet connection and try again.')), 10000)
+      )
+      const { data, error } = await Promise.race([loginPromise, timeout])
+      if (error) throw error
+      if (!data?.user) throw new Error('Login failed — please try again')
+      
+      // Fetch profile with timeout
+      const { data: profileData } = await sb.from('profiles').select('*').eq('id', data.user.id).single()
+      const d = profileData || {}
+      const profile = {
+        id: data.user.id,
+        email: data.user.email || '',
+        first_name: d.first_name || data.user.email?.split('@')[0] || 'User',
+        last_name: d.last_name || '',
+        role: d.role || 'employee',
+        department: d.department || '',
+        employment_type: d.employment_type || 'fulltime',
+        pto_balance: d.pto_balance ?? 15,
+        pto_used: d.pto_used ?? 0,
+        is_active: d.is_active ?? true,
+        hourly_rate: d.hourly_rate || 0,
+      }
+      onLogin(data.user, profile)
     } catch (e) { setErr(e.message || 'Invalid email or password') }
     finally { setLoading(false) }
   }
