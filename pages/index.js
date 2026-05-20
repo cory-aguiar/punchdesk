@@ -827,7 +827,7 @@ function AdminDashboard({ profile, toast }) {
 function TimesheetsPage({ profile, toast }) {
   const [entries, setEntries] = useState([])
   const [loading, setLoading] = useState(true)
-  const [status, setStatus] = useState('pending')
+  const [status, setStatus] = useState('all')  // default to all so entries are visible
   const [weekOf, setWeekOf] = useState(weekStart().toISOString().split('T')[0])
 
   useEffect(()=>{ load() }, [status, weekOf])
@@ -836,7 +836,8 @@ function TimesheetsPage({ profile, toast }) {
     setLoading(true)
     try {
       const from = new Date(weekOf+'T00:00:00').toISOString()
-      const to   = new Date(new Date(weekOf).getTime()+7*86400000).toISOString()
+      // Show 14 days instead of 7 so entries don't fall outside the window
+      const to = new Date(new Date(weekOf).getTime()+14*86400000).toISOString()
       const data = await getAllEntries({ from, to, status: status==='all'?undefined:status })
       setEntries(data||[])
     } catch(e){ toast(e.message,'error') }
@@ -855,10 +856,11 @@ function TimesheetsPage({ profile, toast }) {
             style={{ border:`1px solid ${C.silver}`, borderRadius:5, padding:'8px 11px', fontFamily:'var(--font)', fontSize:12, color:C.black }}/>
           <select value={status} onChange={e=>setStatus(e.target.value)}
             style={{ border:`1px solid ${C.silver}`, borderRadius:5, padding:'8px 11px', fontFamily:'var(--font)', fontSize:12, color:C.black }}>
-            <option value="pending">Pending</option>
+            <option value="all">All Statuses</option>
+            <option value="active">Active (clocked in)</option>
+            <option value="pending">Pending approval</option>
             <option value="approved">Approved</option>
             <option value="flagged">Flagged</option>
-            <option value="all">All</option>
           </select>
         </div>
       </div>
