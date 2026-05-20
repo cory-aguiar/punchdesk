@@ -2340,6 +2340,7 @@ export default function App() {
   useEffect(()=>{
     const sb = getClient()
     let profileCache = null  // cache so re-fires don't overwrite role
+    ;(async () => {
 
     async function loadProfile(user) {
       // Return cached profile if we already have it for this user
@@ -2430,6 +2431,7 @@ export default function App() {
     clearTimeout(safetyTimer)
     setLoading(false)
 
+    })() // end async IIFE
     return ()=>{ clearTimeout(safetyTimer) }
   },[])
 
