@@ -1012,42 +1012,47 @@ export default function App() {
     const sb = getClient()
 
     async function loadProfile(user) {
-      try {
-        const { data, error } = await sb.from('profiles').select('*').eq('id', user.id).single()
-        if (error) console.error('Profile error:', error)
-        const d = data || {}
-        return {
-          id: user.id,
-          email: user.email || '',
-          first_name: d.first_name || user.email?.split('@')[0] || 'User',
-          last_name: d.last_name || '',
-          role: d.role || 'employee',
-          department: d.department || '',
-          employment_type: d.employment_type || 'fulltime',
-          pto_balance: d.pto_balance ?? 15,
-          pto_used: d.pto_used ?? 0,
-          is_active: d.is_active ?? true,
-          hourly_rate: d.hourly_rate || 0,
-        }
-      } catch(e) {
-        console.error('Profile fetch failed:', e)
-        return {
-          id: user.id, email: user.email || '',
-          first_name: user.email?.split('@')[0] || 'User',
-          last_name: '', role: 'employee',
-          department: '', employment_type: 'fulltime',
-          pto_balance: 15, pto_used: 0, is_active: true, hourly_rate: 0,
-        }
+      // Race the profile fetch against a 5-second timeout
+      const timeout = new Promise(resolve => setTimeout(() => resolve(null), 5000))
+      const fetch = sb.from('profiles').select('*').eq('id', user.id).single()
+        .then(({ data, error }) => {
+          if (error) console.error('Profile error:', error)
+          return data || null
+        })
+        .catch(e => { console.error('Profile fetch failed:', e); return null })
+
+      const data = await Promise.race([fetch, timeout])
+      const d = data || {}
+      return {
+        id: user.id,
+        email: user.email || '',
+        first_name: d.first_name || user.email?.split('@')[0] || 'User',
+        last_name: d.last_name || '',
+        role: d.role || 'employee',
+        department: d.department || '',
+        employment_type: d.employment_type || 'fulltime',
+        pto_balance: d.pto_balance ?? 15,
+        pto_used: d.pto_used ?? 0,
+        is_active: d.is_active ?? true,
+        hourly_rate: d.hourly_rate || 0,
       }
     }
 
+    // Always stop loading after 6 seconds no matter what
+    const safetyTimer = setTimeout(() => setLoading(false), 6000)
+
     sb.auth.getSession().then(async({data:{session}})=>{
+      clearTimeout(safetyTimer)
       setSession(session)
       if (session?.user) {
         const p = await loadProfile(session.user)
         setProfile(p)
         setPage(['admin','manager'].includes(p.role)?'dashboard':'clock')
       }
+      setLoading(false)
+    }).catch(e => {
+      console.error('getSession failed:', e)
+      clearTimeout(safetyTimer)
       setLoading(false)
     })
 
@@ -1057,12 +1062,12 @@ export default function App() {
         const p = await loadProfile(session.user)
         setProfile(p)
         setPage(['admin','manager'].includes(p.role)?'dashboard':'clock')
-        setLoading(false)
       } else {
-        setProfile(null); setPage('clock'); setLoading(false)
+        setProfile(null); setPage('clock')
       }
+      setLoading(false)
     })
-    return ()=>subscription.unsubscribe()
+    return ()=>{ subscription.unsubscribe(); clearTimeout(safetyTimer) }
   },[])
 
   async function handleSignOut() { await signOut(); setSession(null); setProfile(null) }
