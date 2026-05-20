@@ -32,10 +32,24 @@ const C = {
 
 // ─── Helpers ──────────────────────────────────────────────────
 const pad = n => String(n).padStart(2, '0')
-function fmtClock(d) { return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` }
-function fmtDateLong(d) { return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }) }
+const HST = 'Pacific/Honolulu'
+
+function fmtClock(d) {
+  // Use HST for the clock display
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: HST })
+}
+function fmtDateLong(d) {
+  return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric', timeZone: HST })
+}
 function weekStart(d = new Date()) {
-  const dd = new Date(d); dd.setDate(dd.getDate() - dd.getDay() + 1); dd.setHours(0,0,0,0); return dd
+  // Get current date in HST
+  const hstStr = d.toLocaleDateString('en-US', { timeZone: 'Pacific/Honolulu', year: 'numeric', month: '2-digit', day: '2-digit' })
+  const [m, day, y] = hstStr.split('/')
+  const hstDate = new Date(`${y}-${m}-${day}T00:00:00-10:00`)
+  const dow = hstDate.getDay()
+  const monday = new Date(hstDate)
+  monday.setDate(monday.getDate() - dow + 1)
+  return monday
 }
 
 // ─── Base Components ──────────────────────────────────────────
@@ -373,9 +387,11 @@ function EditRequestButton({ entry, profile, toast }) {
 
   function formatForInput(iso) {
     if (!iso) return ''
+    // Display in HST for editing
     const d = new Date(iso)
+    const hst = new Date(d.toLocaleString('en-US', { timeZone: 'Pacific/Honolulu' }))
     const pad = n => String(n).padStart(2,'0')
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+    return `${hst.getFullYear()}-${pad(hst.getMonth()+1)}-${pad(hst.getDate())}T${pad(hst.getHours())}:${pad(hst.getMinutes())}`
   }
 
   function openModal() {
@@ -678,8 +694,8 @@ function MyTimeOffPage({ profile, toast }) {
               <Badge variant={r.status==='approved'?'approved':r.status==='denied'?'flagged':'pending'}>{r.status}</Badge>
             </div>
             <div style={{ fontSize:13, color:C.midGray }}>
-              {new Date(r.start_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})}
-              {r.start_date!==r.end_date && ` – ${new Date(r.end_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})}`}
+              {new Date(r.start_date+'T12:00:00-10:00').toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'Pacific/Honolulu'})}
+              {r.start_date!==r.end_date && ` – ${new Date(r.end_date+'T12:00:00-10:00').toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'Pacific/Honolulu'})}`}
               {' '}· {r.days_requested} day{r.days_requested!==1?'s':''}
             </div>
             {r.notes && <div style={{ fontSize:12, color:C.lightGray, marginTop:3 }}>{r.notes}</div>}
@@ -780,8 +796,8 @@ function AdminDashboard({ profile, toast }) {
                 <Badge variant="pending">Pending</Badge>
               </div>
               <div style={{ fontSize:12, color:C.midGray, marginBottom:10, textTransform:'capitalize' }}>
-                {r.leave_type} · {new Date(r.start_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})}
-                {r.start_date!==r.end_date && ` – ${new Date(r.end_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})}`}
+                {r.leave_type} · {new Date(r.start_date+'T12:00:00-10:00').toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'Pacific/Honolulu'})}
+                {r.start_date!==r.end_date && ` – ${new Date(r.end_date+'T12:00:00-10:00').toLocaleDateString('en-US',{month:'short',day:'numeric',timeZone:'Pacific/Honolulu'})}`}
                 {' '}({r.days_requested}d)
               </div>
               <div style={{ display:'flex', gap:7 }}>
@@ -1194,12 +1210,12 @@ function PayPeriodsPage({ profile, toast }) {
   }
 
   function fmtPeriod(p) {
-    const opts = { month: 'short', day: 'numeric' }
+    const opts = { month: 'short', day: 'numeric', timeZone: 'Pacific/Honolulu' }
     return `${p.start.toLocaleDateString('en-US', opts)} – ${p.end.toLocaleDateString('en-US', { ...opts, year: 'numeric' })}`
   }
 
   function fmtPayday(p) {
-    return p.payday.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    return p.payday.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'Pacific/Honolulu' })
   }
 
   const [selectedPeriod, setSelectedPeriod] = useState(periods[0] || null)
@@ -1652,7 +1668,7 @@ function PTOPage({ profile, toast }) {
           <tbody>
             {rows.map(e=>(
               <tr key={e.id}>
-                <TD style={{fontSize:12}}>{new Date(e.entry_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</TD>
+                <TD style={{fontSize:12}}>{new Date(e.entry_date+'T12:00:00-10:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric',timeZone:'Pacific/Honolulu'})}</TD>
                 <TD><Badge variant={entryColor[e.entry_type]||'default'}>{entryLabel[e.entry_type]||e.entry_type}</Badge></TD>
                 <TD style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:500,color:parseFloat(e.hours)>=0?C.black:'#cc4444'}}>
                   {parseFloat(e.hours)>=0?'+':''}{parseFloat(e.hours).toFixed(2)}h
@@ -1805,7 +1821,7 @@ function PTOPage({ profile, toast }) {
                   )}
                   {allLedger.filter(e=>e.leave_type===typeTab).map(e=>(
                     <tr key={e.id}>
-                      <TD style={{fontSize:12}}>{new Date(e.entry_date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</TD>
+                      <TD style={{fontSize:12}}>{new Date(e.entry_date+'T12:00:00-10:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric',timeZone:'Pacific/Honolulu'})}</TD>
                       <TD style={{fontWeight:500,fontSize:12}}>{e.profiles?.first_name} {e.profiles?.last_name}</TD>
                       <TD><Badge variant={entryColor[e.entry_type]||'default'}>{entryLabel[e.entry_type]||e.entry_type}</Badge></TD>
                       <TD style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:500,color:parseFloat(e.hours)>=0?C.black:'#cc4444'}}>
@@ -2035,7 +2051,7 @@ function TimesheetEditPage({ profile, toast }) {
 
   function fmtDT(iso) {
     if (!iso) return '—'
-    return new Date(iso).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit', hour12:true })
+    return new Date(iso).toLocaleString('en-US', { month:'short', day:'numeric', hour:'numeric', minute:'2-digit', hour12:true, timeZone:'Pacific/Honolulu' })
   }
 
   function calcH(ci, co, brk=0) {
