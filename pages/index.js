@@ -312,6 +312,108 @@ function LoginPage({ onLogin, toast }) {
   )
 }
 
+// ─── Inline Edit Request Button (used on clock page rows) ───────
+function EditRequestButton({ entry, profile, toast }) {
+  const sb = getClient()
+  const [open, setOpen] = useState(false)
+  const [form, setForm] = useState({ clockIn:'', clockOut:'', breakMins:0, reason:'' })
+  const [submitting, setSubmitting] = useState(false)
+
+  function formatForInput(iso) {
+    if (!iso) return ''
+    const d = new Date(iso)
+    const pad = n => String(n).padStart(2,'0')
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+
+  function openModal() {
+    setForm({
+      clockIn: formatForInput(entry.clock_in),
+      clockOut: formatForInput(entry.clock_out),
+      breakMins: entry.break_mins || 0,
+      reason: ''
+    })
+    setOpen(true)
+  }
+
+  async function submit() {
+    if (!form.clockIn) { toast('Clock-in time required','error'); return }
+    if (!form.reason.trim()) { toast('Please explain why this edit is needed','error'); return }
+    setSubmitting(true)
+    try {
+      const { error } = await sb.from('timesheet_edit_requests').insert({
+        employee_id: profile.id,
+        time_entry_id: entry.id,
+        original_clock_in: entry.clock_in,
+        original_clock_out: entry.clock_out,
+        original_break_mins: entry.break_mins || 0,
+        requested_clock_in: new Date(form.clockIn).toISOString(),
+        requested_clock_out: form.clockOut ? new Date(form.clockOut).toISOString() : null,
+        requested_break_mins: parseInt(form.breakMins) || 0,
+        reason: form.reason.trim(),
+        status: 'pending'
+      })
+      if (error) throw error
+      toast('Edit request submitted for approval')
+      setOpen(false)
+    } catch(e) { toast(e.message,'error') }
+    finally { setSubmitting(false) }
+  }
+
+  return (
+    <>
+      <button onClick={openModal} style={{
+        border:`1px solid ${C.silver}`, background:'transparent', borderRadius:5,
+        padding:'4px 10px', fontSize:11, fontFamily:'var(--font)', cursor:'pointer',
+        color:C.midGray, fontWeight:500, transition:'all .12s',
+        whiteSpace:'nowrap',
+      }}
+        onMouseEnter={e=>{e.target.style.borderColor=C.darkGray;e.target.style.color=C.black}}
+        onMouseLeave={e=>{e.target.style.borderColor=C.silver;e.target.style.color=C.midGray}}
+      >
+        ✎ Edit
+      </button>
+
+      <Modal open={open} onClose={()=>setOpen(false)} title="Request Timesheet Edit">
+        {/* Current entry summary */}
+        <div style={{ background:C.offWhite, borderRadius:6, padding:'10px 14px', marginBottom:18 }}>
+          <div style={{ fontSize:10, fontWeight:600, textTransform:'uppercase', letterSpacing:.5, color:C.lightGray, marginBottom:6 }}>Current Entry</div>
+          <div style={{ display:'flex', gap:20, fontSize:13, flexWrap:'wrap' }}>
+            <span><span style={{color:C.midGray}}>Date:</span> {formatDate(entry.clock_in)}</span>
+            <span><span style={{color:C.midGray}}>In:</span> <span style={{fontFamily:'var(--mono)'}}>{formatTime(entry.clock_in)}</span></span>
+            <span><span style={{color:C.midGray}}>Out:</span> <span style={{fontFamily:'var(--mono)'}}>{formatTime(entry.clock_out)}</span></span>
+            <span style={{color:C.midGray}}>Break: {entry.break_mins||0}m</span>
+          </div>
+        </div>
+
+        <div style={{ fontSize:13, fontWeight:600, marginBottom:14 }}>Enter corrected values:</div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <Input label="Corrected Clock In" type="datetime-local"
+            value={form.clockIn} onChange={e=>setForm(f=>({...f,clockIn:e.target.value}))}/>
+          <Input label="Corrected Clock Out" type="datetime-local"
+            value={form.clockOut} onChange={e=>setForm(f=>({...f,clockOut:e.target.value}))}/>
+        </div>
+        <Input label="Break (minutes)" type="number" min="0" max="120"
+          value={form.breakMins} onChange={e=>setForm(f=>({...f,breakMins:e.target.value}))} placeholder="0"/>
+
+        <div style={{ marginBottom:16 }}>
+          <FormLabel>Reason for Edit <span style={{color:'#cc4444'}}>*</span></FormLabel>
+          <textarea value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))}
+            rows={3} placeholder="e.g. Forgot to clock out, missed punch, system was down, working offsite without access…"
+            style={{ border:`1px solid ${C.silver}`, borderRadius:5, padding:'9px 12px', fontFamily:'var(--font)', fontSize:13, resize:'vertical', width:'100%', boxSizing:'border-box' }}/>
+          <div style={{ fontSize:11, color:C.lightGray, marginTop:4 }}>This note will be shown to your manager with the request.</div>
+        </div>
+
+        <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
+          <Btn variant="outline" onClick={()=>setOpen(false)}>Cancel</Btn>
+          <Btn onClick={submit} disabled={submitting}>{submitting ? 'Submitting…' : 'Submit for Approval'}</Btn>
+        </div>
+      </Modal>
+    </>
+  )
+}
+
 // ─── Time Clock Page ───────────────────────────────────────────
 function ClockPage({ profile, toast }) {
   const [now, setNow] = useState(new Date())
@@ -415,10 +517,10 @@ function ClockPage({ profile, toast }) {
         <div style={{ overflowX:'auto' }}>
           <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
             <thead>
-              <tr>{['Date','Location','Clock In','Clock Out','Break','Hours','Status'].map(h=><TH key={h}>{h}</TH>)}</tr>
+              <tr>{['Date','Location','Clock In','Clock Out','Break','Hours','Status',''].map(h=><TH key={h}>{h}</TH>)}</tr>
             </thead>
             <tbody>
-              {entries.length===0 && <tr><TD colSpan={7} style={{ textAlign:'center', color:C.lightGray, padding:32 }}>No recent entries</TD></tr>}
+              {entries.length===0 && <tr><TD colSpan={8} style={{ textAlign:'center', color:C.lightGray, padding:32 }}>No recent entries</TD></tr>}
               {entries.map(e=>(
                 <tr key={e.id} style={{ transition:'background .1s' }}>
                   <TD>{formatDate(e.clock_in)}</TD>
@@ -430,6 +532,11 @@ function ClockPage({ profile, toast }) {
                     {e.clock_out ? formatHours(calcHours(e.clock_in,e.clock_out,e.break_mins)) : <span style={{color:C.midGray}}>In progress</span>}
                   </TD>
                   <TD><Badge variant={e.status==='approved'?'approved':e.status==='flagged'?'flagged':e.status==='active'?'active':'pending'}>{e.status}</Badge></TD>
+                  <TD>
+                    {e.clock_out && (
+                      <EditRequestButton entry={e} profile={profile} toast={toast}/>
+                    )}
+                  </TD>
                 </tr>
               ))}
             </tbody>
@@ -2180,35 +2287,50 @@ export default function App() {
 
   useEffect(()=>{
     const sb = getClient()
+    let profileCache = null  // cache so re-fires don't overwrite role
 
     async function loadProfile(user) {
-      // Race the profile fetch against a 5-second timeout
-      const timeout = new Promise(resolve => setTimeout(() => resolve(null), 5000))
-      const fetch = sb.from('profiles').select('*').eq('id', user.id).single()
-        .then(({ data, error }) => {
-          if (error) console.error('Profile error:', error)
-          return data || null
-        })
-        .catch(e => { console.error('Profile fetch failed:', e); return null })
+      // Return cached profile if we already have it for this user
+      if (profileCache && profileCache.id === user.id) return profileCache
 
-      const data = await Promise.race([fetch, timeout])
-      const d = data || {}
-      return {
-        id: user.id,
-        email: user.email || '',
-        first_name: d.first_name || user.email?.split('@')[0] || 'User',
-        last_name: d.last_name || '',
-        role: d.role || 'employee',
-        department: d.department || '',
-        employment_type: d.employment_type || 'fulltime',
-        pto_balance: d.pto_balance ?? 15,
-        pto_used: d.pto_used ?? 0,
-        is_active: d.is_active ?? true,
-        hourly_rate: d.hourly_rate || 0,
+      try {
+        const { data, error } = await sb
+          .from('profiles')
+          .select('*')
+          .eq('id', user.id)
+          .single()
+
+        if (error) console.error('Profile error:', error)
+        const d = data || {}
+        const p = {
+          id: user.id,
+          email: user.email || '',
+          first_name: d.first_name || user.email?.split('@')[0] || 'User',
+          last_name: d.last_name || '',
+          role: d.role || 'employee',
+          department: d.department || '',
+          employment_type: d.employment_type || 'fulltime',
+          pto_balance: d.pto_balance ?? 15,
+          pto_used: d.pto_used ?? 0,
+          is_active: d.is_active ?? true,
+          hourly_rate: d.hourly_rate || 0,
+        }
+        profileCache = p  // cache it
+        return p
+      } catch(e) {
+        console.error('Profile fetch failed:', e)
+        // If we have a cached profile, use it rather than resetting role
+        if (profileCache && profileCache.id === user.id) return profileCache
+        return {
+          id: user.id, email: user.email || '',
+          first_name: user.email?.split('@')[0] || 'User',
+          last_name: '', role: 'employee',
+          department: '', employment_type: 'fulltime',
+          pto_balance: 15, pto_used: 0, is_active: true, hourly_rate: 0,
+        }
       }
     }
 
-    // Always stop loading after 6 seconds no matter what
     const safetyTimer = setTimeout(() => setLoading(false), 6000)
 
     sb.auth.getSession().then(async({data:{session}})=>{
@@ -2217,7 +2339,11 @@ export default function App() {
       if (session?.user) {
         const p = await loadProfile(session.user)
         setProfile(p)
-        setPage(['admin','manager'].includes(p.role)?'dashboard':'clock')
+        setPage(prev => {
+          // Only set page on first load (prev is the default 'clock')
+          if (prev === 'clock' && ['admin','manager'].includes(p.role)) return 'dashboard'
+          return prev
+        })
       }
       setLoading(false)
     }).catch(e => {
@@ -2226,17 +2352,26 @@ export default function App() {
       setLoading(false)
     })
 
-    const {data:{subscription}} = sb.auth.onAuthStateChange(async(event,session)=>{
+    const {data:{subscription}} = sb.auth.onAuthStateChange(async(event, session)=>{
+      // Ignore TOKEN_REFRESHED — this fires every hour and causes the role reset
+      if (event === 'TOKEN_REFRESHED') return
+
       setSession(session)
       if (session?.user) {
         const p = await loadProfile(session.user)
         setProfile(p)
-        setPage(['admin','manager'].includes(p.role)?'dashboard':'clock')
-      } else {
-        setProfile(null); setPage('clock')
+        // Only navigate on actual sign-in, not on every state change
+        if (event === 'SIGNED_IN') {
+          setPage(['admin','manager'].includes(p.role) ? 'dashboard' : 'clock')
+        }
+      } else if (event === 'SIGNED_OUT') {
+        profileCache = null
+        setProfile(null)
+        setPage('clock')
       }
       setLoading(false)
     })
+
     return ()=>{ subscription.unsubscribe(); clearTimeout(safetyTimer) }
   },[])
 
