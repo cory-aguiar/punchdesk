@@ -601,9 +601,7 @@ function ClockPage({ profile, toast }) {
                   </TD>
                   <TD><Badge variant={e.status==='approved'?'approved':e.status==='flagged'?'flagged':e.status==='active'?'active':'pending'}>{e.status}</Badge></TD>
                   <TD>
-                    {e.clock_out && (
-                      <EditRequestButton entry={e} profile={profile} toast={toast}/>
-                    )}
+                    <EditRequestButton entry={e} profile={profile} toast={toast}/>
                   </TD>
                 </tr>
               ))}
@@ -884,9 +882,9 @@ function TimesheetsPage({ profile, toast }) {
         {loading ? <div style={{color:C.lightGray,fontSize:13}}>Loading…</div> : (
           <div style={{ overflowX:'auto' }}>
             <table style={{ width:'100%', borderCollapse:'collapse', fontSize:13 }}>
-              <thead><tr>{['Employee','Dept','Date','Location','In','Out','Break','Hours','Status','Action'].map(h=><TH key={h}>{h}</TH>)}</tr></thead>
+              <thead><tr>{['Employee','Dept','Date','Location','In','Out','Break','Hours','Status','Action','Edit'].map(h=><TH key={h}>{h}</TH>)}</tr></thead>
               <tbody>
-                {entries.length===0 && <tr><TD colSpan={10} style={{textAlign:'center',color:C.lightGray,padding:32}}>No entries found</TD></tr>}
+                {entries.length===0 && <tr><TD colSpan={11} style={{textAlign:'center',color:C.lightGray,padding:32}}>No entries found</TD></tr>}
                 {entries.map(e=>(
                   <tr key={e.id}>
                     <TD style={{fontWeight:500}}>{e.profiles?.first_name} {e.profiles?.last_name}</TD>
@@ -905,6 +903,9 @@ function TimesheetsPage({ profile, toast }) {
                           <Btn size="sm" variant="danger" onClick={async()=>{await flagEntry(e.id);toast('Flagged');load()}}>⚑</Btn>
                         </div>
                       )}
+                    </TD>
+                    <TD>
+                      <EditRequestButton entry={e} profile={profile} toast={toast}/>
                     </TD>
                   </tr>
                 ))}
